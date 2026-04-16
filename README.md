@@ -16,8 +16,9 @@ API REST pour la gestion des outils SaaS internes de TechCorp Solutions.
 - **Langage** : PHP 8.4
 - **Framework** : Symfony 7.4 LTS
 - **API** : API Platform 4.x
-- **ORM** : Doctrine ORM
+- **ORM** : Doctrine ORM 3
 - **Base de données** : MySQL 8.0 (via Docker)
+- **Analyse statique** : PHPStan niveau max (extensions Symfony + Doctrine)
 
 ## Prérequis
 
@@ -76,6 +77,18 @@ php bin/console dbal:run-sql "SELECT COUNT(*) FROM tools"
 
 Doit retourner `24` (nombre d'outils chargés par le seed).
 
+### Alignement entité / schéma
+
+Le schéma base reste géré par `docker/mysql/init.sql` (aucune migration Doctrine n'est lancée). Pour vérifier que les entités sont parfaitement alignées avec les tables réelles :
+
+```bash
+php bin/console doctrine:schema:validate
+```
+
+Doit retourner `The mapping files are correct.` + `The database schema is in sync with the mapping files.`
+
+Un `schema_filter` dans `config/packages/doctrine.yaml` cloisonne Doctrine aux tables mappées (`categories`, `tools`) pour que les tables auxiliaires (`users`, `usage_logs`, `cost_tracking`, etc.) soient ignorées par l'ORM — elles seront requêtées en SQL natif par les services analytics.
+
 ## Qualité du code
 
 L'analyse statique est assurée par **PHPStan** au **niveau maximum**, avec les extensions officielles Symfony et Doctrine.
@@ -86,6 +99,38 @@ composer phpstan
 
 La configuration se trouve dans `phpstan.dist.neon` à la racine.
 
+## Conventions de modélisation
+
+### Entités (`src/Entity/`)
+
+Seules 2 tables sont mappées en entités Doctrine — celles directement exposées par l'API :
+
+| Entité | Table DB | Rôle |
+|---|---|---|
+| `Tool` | `tools` | Ressource principale de l'API (CRUD via API Platform) |
+| `Category` | `categories` | Catalogue de référence, relation `ManyToOne` avec Tool |
+
+Les 5 autres tables (`users`, `user_tool_access`, `usage_logs`, `cost_tracking`, `access_requests`) ne sont **pas mappées** : elles seront interrogées via des requêtes SQL natives dans des services dédiés aux analytics (Part 2). Ça évite de créer des entités lourdes pour du read-only agrégé.
+
+Points notables sur le mapping :
+
+- **`Tool.monthlyCost`** est typé `string` côté PHP pour préserver la précision de `DECIMAL(10,2)`. Le cast en `float` se fait au niveau des DTOs de sortie.
+- **`Tool.ownerDepartment` / `Tool.status`** utilisent `Types::ENUM` natif de Doctrine 3 avec `enumType`. Doctrine dérive automatiquement les valeurs possibles depuis les cases de l'enum PHP — zéro duplication.
+- **Lifecycle callbacks** : `Tool` et `Category` gèrent leurs `created_at` / `updated_at` via `#[ORM\PrePersist]` et `#[ORM\PreUpdate]`, pas dans le constructeur (stratégie symétrique et idiomatic).
+- **Getters nullable honnêtes** : quand une colonne DB autorise NULL, le getter retourne `?T` au lieu de masquer avec un fallback silencieux — ça évite de cacher des données corrompues.
+
+### Enums PHP (`src/Enum/`)
+
+Les enums servent à typer les valeurs métier dont la liste est connue. Selon le niveau de contrainte de la base, le choix se fait au cas par cas :
+
+| Enum | Contrainte DB | Usage |
+|---|---|---|
+| `Department` | `ENUM('Engineering', ...)` côté MySQL | Enum obligatoire — la DB refuse toute valeur hors liste |
+| `ToolStatus` | `ENUM('active', 'deprecated', 'trial')` | Enum obligatoire — idem |
+| `CategoryName` | `VARCHAR(50)` libre | Enum **de référence** — liste les 10 catégories standard pour un usage type-safe côté code, sans forcer l'entité `Category` à les respecter |
+
+Le cas `CategoryName` mérite une explication : la colonne `categories.name` n'est pas contrainte par la base, donc un admin peut insérer une nouvelle catégorie directement en DB. L'entité `Category` conserve un `string $name` libre pour tolérer cette flexibilité, tandis que l'enum `CategoryName` sert de **catalogue fixe** pour toute la partie code qui sait ne traiter que les 10 catégories standard (génération de rapports, filtres, etc.).
+
 ## Structure du projet
 
 ```
@@ -94,6 +139,9 @@ La configuration se trouve dans `phpstan.dist.neon` à la racine.
 ├── config/         # Configuration bundles / routes / services
 ├── docker/         # Stack MySQL + phpMyAdmin (fournie avec le test)
 ├── public/         # Point d'entrée HTTP (index.php)
-├── src/            # Code source applicatif
+├── src/
+│   ├── Entity/     # Entités Doctrine (Tool, Category)
+│   ├── Enum/       # Enums typés (Department, ToolStatus, CategoryName)
+│   └── Repository/ # Repositories Doctrine
 └── var/            # Cache & logs (ignorés par git)
 ```
