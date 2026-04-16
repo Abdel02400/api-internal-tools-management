@@ -6,6 +6,7 @@
 ![Doctrine](https://img.shields.io/badge/Doctrine_ORM-FC6A31?style=for-the-badge&logo=doctrine&logoColor=white)
 ![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?style=for-the-badge&logo=mysql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![PHPStan](https://img.shields.io/badge/PHPStan-Level_max-1c7ed6?style=for-the-badge&logo=php&logoColor=white)
 ![Composer](https://img.shields.io/badge/Composer-2.x-885630?style=for-the-badge&logo=composer&logoColor=white)
 
 API REST pour la gestion des outils SaaS internes de TechCorp Solutions.
@@ -74,6 +75,16 @@ php bin/console dbal:run-sql "SELECT COUNT(*) FROM tools"
 ```
 
 Doit retourner `24` (nombre d'outils chargés par le seed).
+
+## Qualité du code
+
+L'analyse statique est assurée par **PHPStan** au **niveau maximum**, avec les extensions officielles Symfony et Doctrine.
+
+```bash
+composer phpstan
+```
+
+La configuration se trouve dans `phpstan.dist.neon` à la racine.
 
 ## Structure du projet
 
