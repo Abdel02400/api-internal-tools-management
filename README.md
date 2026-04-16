@@ -33,7 +33,10 @@ composer install
 # 2. Démarrer la base de données (MySQL + phpMyAdmin)
 cd docker && docker compose --profile mysql up -d && cd ..
 
-# 3. Démarrer le serveur de développement
+# 3. Copier .env.local.example vers .env.local
+cp .env.local.example .env.local
+
+# 4. Démarrer le serveur de développement
 php -S localhost:8000 -t public/
 ```
 
@@ -51,6 +54,26 @@ La configuration Docker fournie démarre :
 - **phpMyAdmin** sur `localhost:8080`
 
 Les données initiales (24 outils, catégories, utilisateurs, historique d'usage) sont chargées automatiquement depuis `docker/mysql/init.sql` au premier démarrage du container.
+
+### Configuration locale (.env.local)
+
+Les credentials de connexion vivent dans `.env.local` (non versionné). Un fichier `.env.local.example` committé sert de template.
+
+Exemple `.env.local` :
+
+```env
+###> doctrine/doctrine-bundle ###
+DATABASE_URL="mysql://dev:dev123@127.0.0.1:3306/internal_tools?serverVersion=8.0&charset=utf8mb4"
+###< doctrine/doctrine-bundle ###
+```
+
+Tester la connexion :
+
+```bash
+php bin/console dbal:run-sql "SELECT COUNT(*) FROM tools"
+```
+
+Doit retourner `24` (nombre d'outils chargés par le seed).
 
 ## Structure du projet
 
