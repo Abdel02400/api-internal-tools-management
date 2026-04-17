@@ -146,11 +146,12 @@ La config d'API Platform est **entièrement externalisée** des entités via la 
 ┌─────────────────────────────────────────────┐
 │ ToolCollectionProvider                      │
 ├─────────────────────────────────────────────┤
-│ 1. Construit ListToolsQuery depuis Request  │
-│ 2. ListToolsQueryValidator->validate()      │ ← Asserts + règles business
-│ 3. Repository->findBy()                     │
-│ 4. ToolMapper->toOutput() sur chaque Tool   │
-│ 5. Retourne ToolCollectionOutput            │
+│ 1. ListToolsQueryFactory->create()          │ ← parse params, cast float, collecte violations numeric
+│ 2. ValidatorInterface->validate($query)     │ ← Asserts + Callback (min_cost <= max_cost)
+│ 3. ToolRepository->search($query)           │ ← filtres DB (WHERE department, monthlyCost >= / <=, JOIN c.name)
+│ 4. ToolRepository->countAll()               │ ← total non filtré
+│ 5. ToolMapper->toOutput() sur chaque Tool   │
+│ 6. Retourne ToolCollectionOutput            │ ← shape contextualisée (voir plus bas)
 └─────────────────────────────────────────────┘
               ↓
 ┌─────────────────────────────────────────────┐
@@ -182,6 +183,22 @@ src/Dto/
 
 Tous les DTOs sont `final readonly class` avec promoted properties.
 
+**`ListToolsQuery`** est **auto-contenue** : elle expose `hasFilters()`, `toFilterArray()` et porte son `#[Assert\Callback]` pour la règle business `min_cost <= max_cost`. Pas besoin d'un validator service dédié — `ValidatorInterface` est injecté directement dans le provider.
+
+### Factory (`src/Factory/`)
+
+**`ListToolsQueryFactory`** construit le DTO depuis la Request Symfony :
+- Injection de `RequestStack` (pas de fuite du `$context['request']` d'API Platform)
+- Conversion `string → float` sécurisée via `NullableFloat` — si le param n'est pas numérique, on catch `InvalidNumericValueException` et on **collecte** une `ConstraintViolation` (zéro duplication d'erreurs : factory + validator poussent dans la même `ConstraintViolationList`, la `ValidationFailedException` finale regroupe tout)
+- Les violations numeric sont construites via `App\Validator\ViolationFactory::numeric()` — centralisé
+
+### Value Objects (`src/ValueObject/`)
+
+`NullableFloat::from(mixed $raw): ?float` encapsule la conversion :
+- `null` ou chaîne vide → `null`
+- Numérique → cast `float`
+- Autre → throw `InvalidNumericValueException` avec message centralisé
+
 ### Mapper (`src/Mapper/`)
 
 `ToolMapper` transforme `Tool` (entité Doctrine) en `ToolOutput` / `ToolDetailOutput` (DTOs). Il encapsule :
@@ -193,23 +210,27 @@ Toute violation d'invariant (ex: entité non persistée) déclenche `InvalidTool
 
 ## Validation
 
-Architecture à deux niveaux :
+Architecture à **3 couches** qui convergent toutes vers `ValidationFailedException` → 400 unifié :
 
-### Niveau 1 — Asserts sur les DTOs
-Contraintes structurelles via les attributs `#[Assert\...]` sur les propriétés du DTO. Messages centralisés dans `App\Validator\Message\ValidationMessage` (`MUST_BE_NUMBER`, `MUST_BE_POSITIVE_OR_ZERO`, etc.).
+### 1. Schema API Platform (en amont du provider)
+Les `QueryParameter` de `ToolResource` déclarent des schemas JSON (`enum`, `type`) qu'AP valide automatiquement avant d'atteindre notre code. Exemple : `?department=Legal` est rejeté par AP sans appeler le provider.
 
-### Niveau 2 — Validators services (`src/Validator/`)
-Services dédiés qui utilisent `ValidatorInterface` ET ajoutent des règles business.
+### 2. Asserts sur les DTOs (contraintes déclaratives)
+`ListToolsQuery` porte :
+- `#[Assert\PositiveOrZero]` sur `minCost` / `maxCost`
+- `#[Assert\Length(max: Category::MAX_NAME_LENGTH)]` sur `category`
+- `#[Assert\Callback]` sur `validate()` — règle business cross-field `min_cost <= max_cost`
 
-Exemple pour les query params :
-```
-src/Validator/Tool/ListToolsQueryValidator.php
-```
-- Invoke Symfony Validator sur le DTO
-- Ajoute la règle `min_cost <= max_cost` (cross-field)
-- Throws `Symfony\Component\Validator\Exception\ValidationFailedException` si violations
+Messages centralisés dans `App\Validator\Message\ValidationMessage` (`MUST_BE_NUMBER`, `MUST_BE_POSITIVE_OR_ZERO`, `MIN_COST_GREATER_THAN_MAX`, etc.).
 
-Certains paramètres (`department`, `status`) ne portent pas d'`#[Assert\Choice]` sur le DTO car API Platform les valide **en amont** via le schema `enum` des `QueryParameter` → un commentaire dans le DTO l'indique.
+### 3. Parsing/Type-coercion dans la Factory
+La factory collecte des violations sans throw direct (via `ViolationFactory::numeric()`) quand un param numérique n'est pas convertible. Permet **cumuler** les erreurs de type et les règles Asserts dans une même `ConstraintViolationList`.
+
+### Pourquoi pas d'`#[Assert\Choice]` sur `department` et `status` ?
+Parce qu'AP les valide en amont via leur `enum` dans le schema `QueryParameter`. Ajouter un Assert dupliquerait la validation — un commentaire dans `ListToolsQuery` le documente.
+
+### `ViolationFactory` (`src/Validator/ViolationFactory.php`)
+Centralise la création de `ConstraintViolation` pour éviter la verbosité de son constructeur (6 params obligatoires). Actuellement : `numeric(field, value)` — à étendre selon les besoins.
 
 ## Format d'erreur (`src/EventSubscriber/ApiExceptionSubscriber.php`)
 
@@ -220,11 +241,33 @@ Un `ApiExceptionSubscriber` intercepte toutes les exceptions levées sur les rou
 | **400** | `{ error: "Validation failed", details: { field: msg } }` | `ValidationFailedException` (Symfony) ou `ConstraintViolationListAwareExceptionInterface` (AP) |
 | **404** | `{ error: "Tool not found", message: "Tool with ID X does not exist" }` | `ToolNotFoundException` |
 | **404** | `{ error: "Resource not found", message: "..." }` | Autre `NotFoundHttpException` (route non trouvée, etc.) |
-| **500** | `{ error: "Internal server error", message: "..." }` | Tout le reste |
+| **500** | `{ error: "Internal server error", message: "Database connection failed" }` | `Doctrine\DBAL\Exception` — message standardisé |
+| **500** | `{ error: "Internal server error", message: "..." }` | Tout le reste — message brut en dev, **message générique en prod** via `%kernel.debug%` |
 
 Les JSON sont construits via une classe factory `App\Http\ApiResponse` (factory `build()` privée + méthodes publiques expressives `notFound()`, `validationFailed()`, `internalError()`).
 
 Le prefix API `/api` vient d'un paramètre Symfony `%api_prefix%` partagé entre `config/routes/api_platform.yaml` et le subscriber (via `#[Autowire]`) — une seule source de vérité.
+
+### Messages et statuts (`src/Http/ApiMessage.php` + `App\Http\ApiResponse` constantes)
+
+- **`ApiMessage::noResourceAvailable($resource)`** — "No tools available in the database" (DB vide)
+- **`ApiMessage::noMatch($resource)`** — "No tools match the applied filters" (filtres sans résultat)
+- **`ApiResponse::MESSAGE_DATABASE_CONNECTION_FAILED`** — "Database connection failed"
+- **`ApiResponse::MESSAGE_INTERNAL_ERROR`** — "Internal server error occurred" (fallback prod)
+
+## Shape contextuelle de la réponse `GET /api/tools`
+
+Les champs de `ToolCollectionOutput` apparaissent **uniquement quand ils sont pertinents** (configuration Symfony Serializer `skip_null_values: true`) :
+
+| Scénario | Clés présentes | Exemple |
+|---|---|---|
+| DB peuplée, aucun filtre | `data`, `total` | `{ "data": [...], "total": 24 }` |
+| DB peuplée, avec filtres | `data`, `total`, `filtered`, `filters_applied` | `{ ..., "filtered": 7, "filters_applied": {"department": "Engineering"} }` |
+| Filtres sans résultat | idem + `message` | `{ ..., "message": "No tools match the applied filters" }` |
+| DB vide, sans filtre | `data`, `total`, `message` | `{ "data": [], "total": 0, "message": "No tools available in the database" }` |
+| DB vide, avec filtres | `data`, `total`, `filtered`, `filters_applied`, `message` | idem avec les filtres en plus |
+
+→ Le client comprend la différence entre **DB vide** (problème infra/données) et **filtres trop restrictifs** (résultat normal).
 
 ## Structure du projet
 
@@ -239,24 +282,28 @@ Le prefix API `/api` vient d'un paramètre Symfony `%api_prefix%` partagé entre
 ├── public/                           # Point d'entrée HTTP (index.php)
 ├── src/
 │   ├── ApiResource/
-│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables
+│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/Tool/
 │   │   ├── Input/                    # DTOs POST/PUT (à venir)
 │   │   ├── Output/                   # DTOs GET responses
-│   │   └── Query/                    # DTOs query params
-│   ├── Entity/                       # Entités Doctrine (Tool, Category)
+│   │   └── Query/                    # DTOs query params (auto-contenus : Asserts + Callback + helpers)
+│   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
 │   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
-│   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException)
+│   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException)
 │   │   └── Http/                     # Exceptions mappées à des codes HTTP (ToolNotFoundException)
-│   ├── Http/ApiResponse.php          # Factory pour JsonResponse d'erreur
+│   ├── Factory/Tool/                 # ListToolsQueryFactory — Request → DTO + collecte de violations
+│   ├── Http/
+│   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch)
+│   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, ...)
 │   ├── Mapper/ToolMapper.php         # Transform Tool → DTOs output
-│   ├── Repository/                   # Repositories Doctrine
+│   ├── Repository/                   # Repositories Doctrine (ToolRepository::search + countAll)
 │   ├── State/Provider/               # ToolCollectionProvider, ToolItemProvider
-│   └── Validator/
-│       ├── Message/ValidationMessage.php  # Messages d'erreur génériques
-│       └── Tool/                          # Validators services par DTO
+│   ├── Validator/
+│   │   ├── Message/ValidationMessage.php  # Messages d'erreur génériques
+│   │   └── ViolationFactory.php           # Factory pour ConstraintViolation
+│   └── ValueObject/                  # NullableFloat — parsing typé safe
 └── var/                              # Cache & logs (ignorés par git)
 ```

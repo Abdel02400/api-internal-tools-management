@@ -48,7 +48,7 @@ final class ToolResource
 {
     public const SHORT_NAME = 'Tool';
     public const ID_PARAM = 'id';
-    public const URI_BASE = '/tools';
+    public const URI_BASE = '/' . Tool::TABLE_NAME;
     public const URI_ITEM = self::URI_BASE . '/{' . self::ID_PARAM . '}';
 
     public const PARAM_DEPARTMENT = 'department';

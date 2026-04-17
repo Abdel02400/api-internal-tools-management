@@ -12,6 +12,8 @@ final class ApiResponse
     public const ERROR_VALIDATION_FAILED = 'Validation failed';
 
     public const MESSAGE_RESOURCE_NOT_FOUND = 'The requested resource could not be found';
+    public const MESSAGE_INTERNAL_ERROR = 'Internal server error occurred';
+    public const MESSAGE_DATABASE_CONNECTION_FAILED = 'Database connection failed';
 
     private function __construct()
     {

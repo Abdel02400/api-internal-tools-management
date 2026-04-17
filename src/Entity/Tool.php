@@ -11,7 +11,7 @@ use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity(repositoryClass: ToolRepository::class)]
-#[ORM\Table(name: 'tools')]
+#[ORM\Table(name: self::TABLE_NAME)]
 #[ORM\Index(name: 'idx_tools_category', columns: ['category_id'])]
 #[ORM\Index(name: 'idx_tools_department', columns: ['owner_department'])]
 #[ORM\Index(name: 'idx_tools_cost_desc', columns: ['monthly_cost'])]
@@ -20,6 +20,7 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\HasLifecycleCallbacks]
 final class Tool
 {
+    public const TABLE_NAME = 'tools';
     public const int MIN_NAME_LENGTH = 2;
     public const int MAX_NAME_LENGTH = 100;
     public const int MAX_VENDOR_LENGTH = 100;

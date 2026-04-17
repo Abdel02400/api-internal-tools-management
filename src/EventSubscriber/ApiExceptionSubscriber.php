@@ -6,6 +6,7 @@ use ApiPlatform\Validator\Exception\ConstraintViolationListAwareExceptionInterfa
 use App\ApiResource\Tool\ToolResource;
 use App\Exception\Http\ToolNotFoundException;
 use App\Http\ApiResponse;
+use Doctrine\DBAL\Exception as DbalException;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -40,6 +41,8 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
     public function __construct(
         #[Autowire('%api_prefix%')]
         private readonly string $apiPrefix,
+        #[Autowire('%kernel.debug%')]
+        private readonly bool $isDebug = false,
     ) {
         $this->nameConverter = new CamelCaseToSnakeCaseNameConverter();
     }
@@ -91,7 +94,13 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
             return ApiResponse::resourceNotFound($exception->getMessage() ?: null);
         }
 
-        return ApiResponse::internalError($exception->getMessage());
+        if ($exception instanceof DbalException) {
+            return ApiResponse::internalError(ApiResponse::MESSAGE_DATABASE_CONNECTION_FAILED);
+        }
+
+        return ApiResponse::internalError(
+            $this->isDebug ? $exception->getMessage() : ApiResponse::MESSAGE_INTERNAL_ERROR,
+        );
     }
 
     private function extractViolations(Throwable $exception): ?ConstraintViolationListInterface

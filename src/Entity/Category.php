@@ -12,11 +12,12 @@ use Doctrine\ORM\Mapping as ORM;
 use Symfony\Component\Serializer\Attribute\Groups;
 
 #[ORM\Entity(repositoryClass: CategoryRepository::class)]
-#[ORM\Table(name: 'categories')]
+#[ORM\Table(name: self::TABLE_NAME)]
 #[ORM\UniqueConstraint(name: 'name', columns: ['name'])]
 #[ORM\HasLifecycleCallbacks]
 final class Category
 {
+    public const TABLE_NAME = 'categories';
     public const MAX_NAME_LENGTH = 50;
     public const COLOR_HEX_LENGTH = 7;
     public const string DEFAULT_COLOR = '#6366f1';
