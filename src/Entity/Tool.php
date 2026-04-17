@@ -24,6 +24,8 @@ final class Tool
     public const int MAX_NAME_LENGTH = 100;
     public const int MAX_VENDOR_LENGTH = 100;
     public const int MAX_URL_LENGTH = 255;
+    public const int MONTHLY_COST_PRECISION = 10;
+    public const int MONTHLY_COST_SCALE = 2;
 
     #[ORM\Id]
     #[ORM\GeneratedValue]
@@ -42,11 +44,11 @@ final class Tool
     #[ORM\Column(length: self::MAX_URL_LENGTH, nullable: true)]
     private ?string $websiteUrl = null;
 
-    #[ORM\ManyToOne(targetEntity: Category::class)]
+    #[ORM\ManyToOne(targetEntity: Category::class, inversedBy: 'tools')]
     #[ORM\JoinColumn(name: 'category_id', referencedColumnName: 'id', nullable: false, onDelete: 'RESTRICT')]
     private Category $category;
 
-    #[ORM\Column(type: Types::DECIMAL, precision: 10, scale: 2)]
+    #[ORM\Column(type: Types::DECIMAL, precision: self::MONTHLY_COST_PRECISION, scale: self::MONTHLY_COST_SCALE)]
     private string $monthlyCost;
 
     #[ORM\Column(type: Types::INTEGER, options: ['default' => 0])]

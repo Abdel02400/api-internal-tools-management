@@ -1,6 +1,12 @@
 api_platform:
-    title: Hello API Platform
+    title: Internal Tools API
+    description: API REST pour la gestion des outils SaaS internes de TechCorp Solutions.
     version: 1.0.0
+    formats:
+        json: ['application/json']
+    error_formats:
+        json: ['application/json']
+    name_converter: 'serializer.name_converter.camel_case_to_snake_case'
     defaults:
         stateless: true
         cache_headers:

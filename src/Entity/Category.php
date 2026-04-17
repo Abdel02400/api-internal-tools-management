@@ -17,6 +17,8 @@ use Symfony\Component\Serializer\Attribute\Groups;
 #[ORM\HasLifecycleCallbacks]
 final class Category
 {
+    public const MAX_NAME_LENGTH = 50;
+    public const COLOR_HEX_LENGTH = 7;
     public const string DEFAULT_COLOR = '#6366f1';
     public const string GROUP_READ = 'category:read';
 
@@ -26,7 +28,7 @@ final class Category
     #[Groups([self::GROUP_READ])]
     private ?int $id = null;
 
-    #[ORM\Column(length: 50)]
+    #[ORM\Column(length: self::MAX_NAME_LENGTH)]
     #[Groups([self::GROUP_READ])]
     private string $name;
 
@@ -34,7 +36,7 @@ final class Category
     #[Groups([self::GROUP_READ])]
     private ?string $description = null;
 
-    #[ORM\Column(length: 7, nullable: true, options: ['default' => self::DEFAULT_COLOR])]
+    #[ORM\Column(length: self::COLOR_HEX_LENGTH, nullable: true, options: ['default' => self::DEFAULT_COLOR])]
     #[Groups([self::GROUP_READ])]
     private ?string $colorHex = self::DEFAULT_COLOR;
 

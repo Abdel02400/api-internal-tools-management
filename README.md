@@ -131,17 +131,132 @@ Les enums servent à typer les valeurs métier dont la liste est connue. Selon l
 
 Le cas `CategoryName` mérite une explication : la colonne `categories.name` n'est pas contrainte par la base, donc un admin peut insérer une nouvelle catégorie directement en DB. L'entité `Category` conserve un `string $name` libre pour tolérer cette flexibilité, tandis que l'enum `CategoryName` sert de **catalogue fixe** pour toute la partie code qui sait ne traiter que les 10 catégories standard (génération de rapports, filtres, etc.).
 
+## Architecture de l'API (`src/ApiResource/` + `src/State/`)
+
+La config d'API Platform est **entièrement externalisée** des entités via la classe shell `ToolResource`. L'entité `Tool` reste du Doctrine pur, sans aucune annotation `#[ApiResource]`.
+
+```
+┌─────────────────────────────────────────────┐
+│ GET /api/tools                              │
+├─────────────────────────────────────────────┤
+│ API Platform schema validator               │ ← valide enum sur query params
+│ (via QueryParameter dans ToolResource)      │
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ ToolCollectionProvider                      │
+├─────────────────────────────────────────────┤
+│ 1. Construit ListToolsQuery depuis Request  │
+│ 2. ListToolsQueryValidator->validate()      │ ← Asserts + règles business
+│ 3. Repository->findBy()                     │
+│ 4. ToolMapper->toOutput() sur chaque Tool   │
+│ 5. Retourne ToolCollectionOutput            │
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ JSON snake_case (NameConverter global)      │
+└─────────────────────────────────────────────┘
+```
+
+### Query parameters réutilisables (`src/ApiResource/QueryParameter/`)
+
+Trois classes génériques qui étendent `QueryParameter` pour éviter la duplication dans les attributs :
+
+- **`EnumQueryParameter`** — prend un array de values (ex: `new EnumQueryParameter(Department::VALUES)`)
+- **`PositiveNumberQueryParameter`** — schema `type: number, minimum: 0`
+- **`StringQueryParameter`** — schema `type: string` libre
+
+Réutilisables pour toutes les futures ressources (analytics Part 2).
+
+### DTOs (`src/Dto/`)
+
+Organisation **par ressource puis par direction** pour scaler sur plusieurs ressources :
+
+```
+src/Dto/
+└── Tool/
+    ├── Input/          # POST/PUT bodies (à venir)
+    ├── Output/         # GET responses (ToolOutput, ToolDetailOutput, ToolCollectionOutput, UsageMetricsOutput)
+    └── Query/          # GET query params (ListToolsQuery)
+```
+
+Tous les DTOs sont `final readonly class` avec promoted properties.
+
+### Mapper (`src/Mapper/`)
+
+`ToolMapper` transforme `Tool` (entité Doctrine) en `ToolOutput` / `ToolDetailOutput` (DTOs). Il encapsule :
+- Le flatten `Category → string $category` (juste le nom)
+- Le cast `string (DECIMAL) → float` pour `monthlyCost`
+- Le calcul de `totalMonthlyCost = monthlyCost × activeUsersCount`
+
+Toute violation d'invariant (ex: entité non persistée) déclenche `InvalidToolStateException`.
+
+## Validation
+
+Architecture à deux niveaux :
+
+### Niveau 1 — Asserts sur les DTOs
+Contraintes structurelles via les attributs `#[Assert\...]` sur les propriétés du DTO. Messages centralisés dans `App\Validator\Message\ValidationMessage` (`MUST_BE_NUMBER`, `MUST_BE_POSITIVE_OR_ZERO`, etc.).
+
+### Niveau 2 — Validators services (`src/Validator/`)
+Services dédiés qui utilisent `ValidatorInterface` ET ajoutent des règles business.
+
+Exemple pour les query params :
+```
+src/Validator/Tool/ListToolsQueryValidator.php
+```
+- Invoke Symfony Validator sur le DTO
+- Ajoute la règle `min_cost <= max_cost` (cross-field)
+- Throws `Symfony\Component\Validator\Exception\ValidationFailedException` si violations
+
+Certains paramètres (`department`, `status`) ne portent pas d'`#[Assert\Choice]` sur le DTO car API Platform les valide **en amont** via le schema `enum` des `QueryParameter` → un commentaire dans le DTO l'indique.
+
+## Format d'erreur (`src/EventSubscriber/ApiExceptionSubscriber.php`)
+
+Un `ApiExceptionSubscriber` intercepte toutes les exceptions levées sur les routes `%api_prefix%` + URIs des ressources (aujourd'hui `ToolResource::URI_BASE`). Il les normalise au format du spec :
+
+| HTTP | Forme JSON | Origine |
+|---|---|---|
+| **400** | `{ error: "Validation failed", details: { field: msg } }` | `ValidationFailedException` (Symfony) ou `ConstraintViolationListAwareExceptionInterface` (AP) |
+| **404** | `{ error: "Tool not found", message: "Tool with ID X does not exist" }` | `ToolNotFoundException` |
+| **404** | `{ error: "Resource not found", message: "..." }` | Autre `NotFoundHttpException` (route non trouvée, etc.) |
+| **500** | `{ error: "Internal server error", message: "..." }` | Tout le reste |
+
+Les JSON sont construits via une classe factory `App\Http\ApiResponse` (factory `build()` privée + méthodes publiques expressives `notFound()`, `validationFailed()`, `internalError()`).
+
+Le prefix API `/api` vient d'un paramètre Symfony `%api_prefix%` partagé entre `config/routes/api_platform.yaml` et le subscriber (via `#[Autowire]`) — une seule source de vérité.
+
 ## Structure du projet
 
 ```
 .
-├── bin/            # Console Symfony
-├── config/         # Configuration bundles / routes / services
-├── docker/         # Stack MySQL + phpMyAdmin (fournie avec le test)
-├── public/         # Point d'entrée HTTP (index.php)
+├── bin/                              # Console Symfony
+├── config/
+│   ├── packages/                     # Configuration bundles
+│   ├── routes/api_platform.yaml      # Routes AP (prefix: %api_prefix%)
+│   └── services.yaml                 # Parameters (api_prefix)
+├── docker/                           # Stack MySQL + phpMyAdmin (fournie avec le test)
+├── public/                           # Point d'entrée HTTP (index.php)
 ├── src/
-│   ├── Entity/     # Entités Doctrine (Tool, Category)
-│   ├── Enum/       # Enums typés (Department, ToolStatus, CategoryName)
-│   └── Repository/ # Repositories Doctrine
-└── var/            # Cache & logs (ignorés par git)
+│   ├── ApiResource/
+│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables
+│   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
+│   ├── Dto/Tool/
+│   │   ├── Input/                    # DTOs POST/PUT (à venir)
+│   │   ├── Output/                   # DTOs GET responses
+│   │   └── Query/                    # DTOs query params
+│   ├── Entity/                       # Entités Doctrine (Tool, Category)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName)
+│   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
+│   ├── Exception/
+│   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException)
+│   │   └── Http/                     # Exceptions mappées à des codes HTTP (ToolNotFoundException)
+│   ├── Http/ApiResponse.php          # Factory pour JsonResponse d'erreur
+│   ├── Mapper/ToolMapper.php         # Transform Tool → DTOs output
+│   ├── Repository/                   # Repositories Doctrine
+│   ├── State/Provider/               # ToolCollectionProvider, ToolItemProvider
+│   └── Validator/
+│       ├── Message/ValidationMessage.php  # Messages d'erreur génériques
+│       └── Tool/                          # Validators services par DTO
+└── var/                              # Cache & logs (ignorés par git)
 ```

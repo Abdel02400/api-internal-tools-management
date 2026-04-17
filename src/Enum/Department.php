@@ -11,4 +11,14 @@ enum Department: string
     case Finance = 'Finance';
     case Operations = 'Operations';
     case Design = 'Design';
+
+    public const VALUES = [
+        self::Engineering->value,
+        self::Sales->value,
+        self::Marketing->value,
+        self::HR->value,
+        self::Finance->value,
+        self::Operations->value,
+        self::Design->value,
+    ];
 }
