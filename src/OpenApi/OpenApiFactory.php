@@ -73,17 +73,13 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             $responses[$successCode] = $this->enrichSuccessResponse($path, $method, $responses[$successCode]);
         }
 
-        if (!isset($responses['400'])) {
-            $responses['400'] = $this->validationErrorResponse($path);
-        }
+        $responses['400'] = $this->validationErrorResponse($path);
 
-        if ($this->supportsNotFound($path, $method) && !isset($responses['404'])) {
+        if ($this->supportsNotFound($path, $method)) {
             $responses['404'] = $this->notFoundResponse($path);
         }
 
-        if (!isset($responses['500'])) {
-            $responses['500'] = $this->internalErrorResponse();
-        }
+        $responses['500'] = $this->internalErrorResponse();
 
         return $operation->withResponses($responses);
     }
