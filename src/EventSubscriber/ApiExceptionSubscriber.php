@@ -32,8 +32,11 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
      * URIs (relatives au prefix API) dont les exceptions sont normalisées ici.
      * Chaque URI correspond à la base d'une ressource (les sous-paths type /{id} sont couverts par str_starts_with).
      */
+    private const ANALYTICS_PREFIX = '/analytics';
+
     private const HANDLED_RESOURCE_URIS = [
         ToolResource::URI_BASE,
+        self::ANALYTICS_PREFIX,
     ];
 
     /**

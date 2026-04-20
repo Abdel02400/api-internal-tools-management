@@ -518,6 +518,93 @@ Même DTO que pour POST (shape identique, 12 champs). Ancien nom `ToolCreatedOut
 
 Géré par le lifecycle callback `#[ORM\PreUpdate]` de l'entité `Tool` — il se déclenche automatiquement sur `em->flush()` dès qu'un champ change. Si le PUT n'applique **aucun** changement effectif (body vide, ou valeurs identiques), PreUpdate ne fire pas → `updated_at` reste identique. Comportement Doctrine standard, acceptable.
 
+## Analytics — `GET /api/analytics/department-costs`
+
+Premier endpoint de la couche Analytics (Part 2). Agrège les coûts par département sur les outils `status = 'active'` uniquement (règle globale du spec pour tous les endpoints analytics).
+
+### Flux
+
+```
+┌─────────────────────────────────────────────────────┐
+│ DepartmentCostsQueryFactory->create()               │ ← parse sort_by / order depuis Request
+│                                                     │   (enums validés par AP en amont via
+│                                                     │    EnumQueryParameter schema)
+└─────────────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────────────┐
+│ DepartmentCostCollectionProvider                    │
+├─────────────────────────────────────────────────────┤
+│ 1. ValidatorInterface->validate($query)             │ ← ceinture + bretelles (défauts appliqués)
+│ 2. DepartmentCostRepository->aggregate($query)      │ ← SQL natif GROUP BY owner_department
+│ 3. DepartmentCostMapper->toCollection($rows)        │ ← calcul cost_percentage + summary
+└─────────────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────────────┐
+│ DepartmentCostCollectionOutput                      │ → JSON { data, summary, message? }
+└─────────────────────────────────────────────────────┘
+```
+
+### SQL (DBAL natif)
+
+```sql
+SELECT
+    t.owner_department AS department,
+    COUNT(t.id) AS tools_count,
+    SUM(t.active_users_count) AS total_users,
+    SUM(t.monthly_cost) AS total_cost,
+    SUM(t.monthly_cost) / COUNT(t.id) AS average_cost_per_tool
+FROM tools t
+WHERE t.status = 'active'
+GROUP BY t.owner_department
+ORDER BY {column} {direction}
+```
+
+`cost_percentage` et `most_expensive_department` sont calculés côté PHP (le premier nécessite le total compagnie global, le second fait un tie-break alphabétique après max).
+
+### Tri supporté (`?sort_by=...&order=...`)
+
+| Valeur `sort_by` | Colonne SQL | Défaut |
+|---|---|---|
+| `total_cost` | `total_cost` | ✅ (+ `order=desc`) |
+| `tools_count` | `tools_count` | |
+| `total_users` | `total_users` | |
+| `average_cost_per_tool` | `average_cost_per_tool` | |
+| `department` | `CAST(department AS CHAR)` — voir note | |
+
+**Note sur `department`** : la colonne `owner_department` est un ENUM MySQL — un `ORDER BY` natif trie par **ordre de déclaration** des cases (pas alphabétique). Le `CAST(... AS CHAR)` force un tri alphabétique stable côté client.
+
+### Règles métier (clarifications spec)
+
+- **`cost_percentage`** = `(département.total_cost / company.total_cost) * 100`, arrondi à 1 décimale. La somme sur tous les départements vaut 100% (tolérance ±0.1%).
+- **`average_cost_per_tool`** = `total_cost / tools_count`, arrondi à 2 décimales.
+- **`most_expensive_department`** = département avec le plus haut `total_cost`. Tie-break alphabétique ASC si égalité.
+- **Départements sans outils actifs** : naturellement exclus (le `GROUP BY` ne les fait pas apparaître). `departments_count` reflète donc le nombre de départements ayant au moins 1 outil actif.
+
+### Shape contextuelle (empty DB)
+
+Même logique que `GET /api/tools` :
+
+| Scénario | Shape |
+|---|---|
+| DB peuplée | `{ data: [...], summary: { total_company_cost, departments_count, most_expensive_department } }` |
+| Aucun outil actif | `{ data: [], summary: { total_company_cost: 0 }, message: "No analytics data available - ..." }` |
+
+`departments_count` et `most_expensive_department` sont omis via `skip_null_values` quand il n'y a aucune donnée (nullable dans `DepartmentCostSummary`).
+
+### Helpers shared analytics (`src/Helper/`)
+
+- **`NumberFormatter::money(float): float`** — arrondi 2 décimales pour les montants
+- **`NumberFormatter::percent(float): float`** — arrondi 1 décimale pour les pourcentages
+- **`ScalarCast::toInt/toFloat/toString(mixed): scalar`** — narrowing des valeurs `mixed` retournées par DBAL (MySQL renvoie les agrégats DECIMAL comme string via PDO)
+
+Réutilisables pour les 4 endpoints analytics à venir (`expensive-tools`, `tools-by-category`, `low-usage-tools`, `vendor-summary`).
+
+### Prise en compte par l'infra existante
+
+- **`ApiExceptionSubscriber::HANDLED_RESOURCE_URIS`** — élargi avec `/analytics` (préfixe) pour couvrir les 5 endpoints analytics d'un seul tenant
+- **`OpenApiFactory`** — nouveau branche `isDepartmentCostsPath()` avec 2 exemples 200 (`with_data` + `empty_db`)
+- **`ApiMessage::NO_ANALYTICS_DATA`** — constante dédiée pour le message "empty DB"
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -531,6 +618,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `ToolDetailExample` — 2 exemples `GET /api/tools/{id}` (détail complet + outil peu utilisé)
 - `CreateToolExample` — body d'entrée, 201, 400 (field errors + unknown fields)
 - `UpdateToolExample` — body partiel, 200, 400 (field errors + id invalide + unknown fields)
+- `Analytics\DepartmentCostExample` — GET analytics department-costs, 200 (données présentes + empty DB)
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -547,30 +635,38 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 ├── public/                           # Point d'entrée HTTP (index.php)
 ├── src/
 │   ├── ApiResource/
+│   │   ├── Analytics/                # Config AP pour les endpoints analytics (DepartmentCostAnalyticsResource, ...)
 │   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
-│   ├── Dto/Tool/
-│   │   ├── Input/                    # DTOs body POST/PUT (CreateToolInput, UpdateToolInput — Asserts + contraintes custom DB)
-│   │   ├── Output/                   # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
-│   │   └── Query/                    # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
+│   ├── Dto/
+│   │   ├── Analytics/                # DTOs analytics par endpoint (DepartmentCost/{Query,Output}/, ...)
+│   │   └── Tool/
+│   │       ├── Input/                # DTOs body POST/PUT (CreateToolInput, UpdateToolInput — Asserts + contraintes custom DB)
+│   │       ├── Output/               # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
+│   │       └── Query/                # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
-│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
 │   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
 │   │   └── Http/                     # Exceptions mappées à des codes HTTP (ToolNotFoundException)
-│   ├── Factory/Tool/                 # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
+│   ├── Factory/
+│   │   ├── Analytics/                # Factories query params pour analytics (DepartmentCostsQueryFactory, ...)
+│   │   └── Tool/                     # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
+│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast — utilisés par la couche Analytics)
 │   ├── Http/
 │   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
 │   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)
-│   ├── Mapper/ToolMapper.php         # Transform Tool → DTOs output
+│   ├── Mapper/
+│   │   ├── Analytics/                # Mappers row SQL → DTOs output analytics (DepartmentCostMapper, ...)
+│   │   └── ToolMapper.php            # Transform Tool → DTOs output
 │   ├── OpenApi/
 │   │   ├── Example/                  # Constantes d'exemples JSON (ErrorResponse, ToolCollection, ToolDetail)
 │   │   └── OpenApiFactory.php        # Decorator enrichissant Swagger (exemples 200 + réponses 400/404/500)
-│   ├── Repository/                   # ToolRepository (ORM), UsageLogRepository (DBAL natif pour `usage_logs` non mappée)
+│   ├── Repository/                   # ToolRepository (ORM), UsageLogRepository (DBAL), Analytics/ (DBAL natifs par endpoint)
 │   ├── State/
 │   │   ├── Processor/                # ToolPersistProcessor (POST), ToolUpdateProcessor (PUT)
-│   │   └── Provider/                 # ToolCollectionProvider, ToolItemProvider
+│   │   └── Provider/                 # ToolCollectionProvider, ToolItemProvider, Analytics/ (providers par endpoint)
 │   ├── Validator/
 │   │   ├── Constraint/               # Contraintes custom (UniqueToolName, ExistingCategory) + validators
 │   │   ├── Message/ValidationMessage.php  # Messages d'erreur génériques

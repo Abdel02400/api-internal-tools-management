@@ -10,7 +10,9 @@ use ApiPlatform\OpenApi\Model\PathItem;
 use ApiPlatform\OpenApi\Model\RequestBody;
 use ApiPlatform\OpenApi\Model\Response;
 use ApiPlatform\OpenApi\OpenApi;
+use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
 use App\ApiResource\Tool\ToolResource;
+use App\OpenApi\Example\Analytics\DepartmentCostExample;
 use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
@@ -200,7 +202,25 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'get' && $this->isDepartmentCostsPath($path)) {
+            return [
+                'with_data' => $this->example(
+                    'GET /api/analytics/department-costs — données présentes',
+                    DepartmentCostExample::DATA,
+                ),
+                'empty_db' => $this->example(
+                    'GET /api/analytics/department-costs — aucun outil actif en DB',
+                    DepartmentCostExample::EMPTY_DB,
+                ),
+            ];
+        }
+
         return null;
+    }
+
+    private function isDepartmentCostsPath(string $path): bool
+    {
+        return rtrim($path, '/') === $this->apiPrefix . DepartmentCostAnalyticsResource::URI;
     }
 
     /**
@@ -246,9 +266,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ]);
         }
 
-        $example = $this->isItemPath($path)
-            ? ErrorResponseExample::ID_NOT_INTEGER
-            : ErrorResponseExample::VALIDATION_FAILED;
+        $example = match (true) {
+            $this->isDepartmentCostsPath($path) => DepartmentCostExample::VALIDATION_ERROR,
+            $this->isItemPath($path) => ErrorResponseExample::ID_NOT_INTEGER,
+            default => ErrorResponseExample::VALIDATION_FAILED,
+        };
 
         return new Response(
             description: 'Validation failed — one or several query parameters, path variables or body fields are invalid',
