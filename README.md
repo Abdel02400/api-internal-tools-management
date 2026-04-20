@@ -161,10 +161,11 @@ La config d'API Platform est **entièrement externalisée** des entités via la 
 
 ### Query parameters réutilisables (`src/ApiResource/QueryParameter/`)
 
-Trois classes génériques qui étendent `QueryParameter` pour éviter la duplication dans les attributs :
+Quatre classes génériques qui étendent `QueryParameter` pour éviter la duplication dans les attributs :
 
 - **`EnumQueryParameter`** — prend un array de values (ex: `new EnumQueryParameter(Department::VALUES)`)
 - **`PositiveNumberQueryParameter`** — schema `type: number, minimum: 0`
+- **`PositiveIntegerQueryParameter`** — schema `type: integer, minimum: 1` (+ `maximum` optionnel)
 - **`StringQueryParameter`** — schema `type: string` libre
 
 Réutilisables pour toutes les futures ressources (analytics Part 2).
@@ -192,12 +193,14 @@ Tous les DTOs sont `final readonly class` avec promoted properties.
 - Conversion `string → float` sécurisée via `NullableFloat` — si le param n'est pas numérique, on catch `InvalidNumericValueException` et on **collecte** une `ConstraintViolation` (zéro duplication d'erreurs : factory + validator poussent dans la même `ConstraintViolationList`, la `ValidationFailedException` finale regroupe tout)
 - Les violations numeric sont construites via `App\Validator\ViolationFactory::numeric()` — centralisé
 
-### Value Objects (`src/ValueObject/`)
+### Value Objects (`src/ValueObject/Number/`)
 
-`NullableFloat::from(mixed $raw): ?float` encapsule la conversion :
-- `null` ou chaîne vide → `null`
-- Numérique → cast `float`
-- Autre → throw `InvalidNumericValueException` avec message centralisé
+Deux parseurs typés pour les query params numériques :
+
+- **`NullableFloat::from(mixed $raw): ?float`** — `null`/chaîne vide → `null`, numérique → `float`, sinon throw `InvalidNumericValueException`
+- **`NullableInt::from(mixed $raw): ?int`** — idem mais strict integer, throw `InvalidIntegerValueException` sinon
+
+Les deux exceptions portent un message centralisé, attrapé par la factory pour alimenter la `ConstraintViolationList`.
 
 ### Mapper (`src/Mapper/`)
 
@@ -262,12 +265,52 @@ Les champs de `ToolCollectionOutput` apparaissent **uniquement quand ils sont pe
 | Scénario | Clés présentes | Exemple |
 |---|---|---|
 | DB peuplée, aucun filtre | `data`, `total` | `{ "data": [...], "total": 24 }` |
-| DB peuplée, avec filtres | `data`, `total`, `filtered`, `filters_applied` | `{ ..., "filtered": 7, "filters_applied": {"department": "Engineering"} }` |
-| Filtres sans résultat | idem + `message` | `{ ..., "message": "No tools match the applied filters" }` |
+| DB peuplée, avec filtres | + `filtered`, `filters_applied` | `{ ..., "filtered": 7, "filters_applied": {"department": "Engineering"} }` |
+| Avec pagination | + `pagination_applied` | `{ ..., "pagination_applied": {"page": 2, "limit": 10, "total_pages": 3} }` |
+| Avec tri | + `sort_applied` | `{ ..., "sort_applied": {"sort_by": "cost", "order": "desc"} }` |
+| Filtres sans résultat | + `message` | `{ ..., "message": "No tools match the applied filters" }` |
 | DB vide, sans filtre | `data`, `total`, `message` | `{ "data": [], "total": 0, "message": "No tools available in the database" }` |
-| DB vide, avec filtres | `data`, `total`, `filtered`, `filters_applied`, `message` | idem avec les filtres en plus |
+| Page hors range | + `message` | `{ ..., "message": "Page exceeds available range (max page: 3)" }` |
 
-→ Le client comprend la différence entre **DB vide** (problème infra/données) et **filtres trop restrictifs** (résultat normal).
+→ Le client distingue **DB vide** (problème infra/données), **filtres trop restrictifs** (résultat normal) et **page hors range** (erreur client de pagination).
+
+## Pagination et tri
+
+### Params supportés
+
+| Param | Type | Default | Contrainte |
+|---|---|---|---|
+| `page` | integer | `1` (si pagination activée) | ≥ 1 |
+| `limit` | integer | `10` (si pagination activée) | 1 ≤ limit ≤ 100 |
+| `sort_by` | enum | — | `cost` \| `name` \| `date` |
+| `order` | enum | `asc` (si sort_by présent) | `asc` \| `desc` |
+
+**Règle** : pas de pagination par défaut. Si **aucun** des 2 params `page`/`limit` n'est envoyé, l'API renvoie le dataset complet. Dès qu'**un** est présent, les defaults complètent l'autre.
+
+### Pourquoi `pagination_applied` et `sort_applied` séparés de `filters_applied` ?
+
+Pagination et tri ne sont **pas des filtres** — ils ne réduisent pas le jeu de résultats, ils slice/ordonnent. Les garder dans des champs distincts sépare clairement les 3 intentions client :
+- `filters_applied` = critères de recherche
+- `pagination_applied` = tranche demandée + **`total_pages`** calculé sur le jeu filtré (info utile pour le frontend qui navigue dans les pages)
+- `sort_applied` = ordonnancement
+
+### `total_pages` et page hors range
+
+`total_pages` se base sur le **filtered count** (pas le total global), donc reflète le nombre de pages réellement disponibles pour la requête courante. Si `page > total_pages` → data vide + message `"Page exceeds available range (max page: X)"`.
+
+## Documentation Swagger enrichie (`src/OpenApi/`)
+
+Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
+
+- **Exemples multi-scénarios sur les 200** : chaque endpoint GET a plusieurs `examples` nommés pour illustrer les différents formats de réponse (liste complète, avec filtres, pagination, sans résultat, etc.)
+- **Exemples des erreurs** : 400 / 404 / 500 sont systématiquement documentés avec un JSON d'exemple conforme à notre format
+
+Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour séparer la logique de factory de la data :
+- `ErrorResponseExample` — 400, 404, 500 reference payloads
+- `ToolCollectionExample` — 6 cas de réponse pour `GET /api/tools`
+- `ToolDetailExample` — réponse type pour `GET /api/tools/{id}`
+
+Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
 ## Structure du projet
 
@@ -282,28 +325,31 @@ Les champs de `ToolCollectionOutput` apparaissent **uniquement quand ils sont pe
 ├── public/                           # Point d'entrée HTTP (index.php)
 ├── src/
 │   ├── ApiResource/
-│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, String)
+│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/Tool/
 │   │   ├── Input/                    # DTOs POST/PUT (à venir)
-│   │   ├── Output/                   # DTOs GET responses
-│   │   └── Query/                    # DTOs query params (auto-contenus : Asserts + Callback + helpers)
+│   │   ├── Output/                   # DTOs GET responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ...)
+│   │   └── Query/                    # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
-│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
-│   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException)
+│   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
 │   │   └── Http/                     # Exceptions mappées à des codes HTTP (ToolNotFoundException)
 │   ├── Factory/Tool/                 # ListToolsQueryFactory — Request → DTO + collecte de violations
 │   ├── Http/
-│   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch)
-│   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, ...)
+│   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
+│   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)
 │   ├── Mapper/ToolMapper.php         # Transform Tool → DTOs output
-│   ├── Repository/                   # Repositories Doctrine (ToolRepository::search + countAll)
+│   ├── OpenApi/
+│   │   ├── Example/                  # Constantes d'exemples JSON (ErrorResponse, ToolCollection, ToolDetail)
+│   │   └── OpenApiFactory.php        # Decorator enrichissant Swagger (exemples 200 + réponses 400/404/500)
+│   ├── Repository/                   # Repositories Doctrine (ToolRepository::search + countAll + countMatching)
 │   ├── State/Provider/               # ToolCollectionProvider, ToolItemProvider
 │   ├── Validator/
 │   │   ├── Message/ValidationMessage.php  # Messages d'erreur génériques
 │   │   └── ViolationFactory.php           # Factory pour ConstraintViolation
-│   └── ValueObject/                  # NullableFloat — parsing typé safe
+│   └── ValueObject/Number/           # NullableFloat, NullableInt — parsing typé safe
 └── var/                              # Cache & logs (ignorés par git)
 ```

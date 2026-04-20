@@ -6,12 +6,16 @@ use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
 use App\ApiResource\QueryParameter\EnumQueryParameter;
+use App\ApiResource\QueryParameter\PositiveIntegerQueryParameter;
 use App\ApiResource\QueryParameter\PositiveNumberQueryParameter;
 use App\ApiResource\QueryParameter\StringQueryParameter;
 use App\Dto\Tool\Output\ToolCollectionOutput;
 use App\Dto\Tool\Output\ToolDetailOutput;
+use App\Dto\Tool\Query\ListToolsQuery;
 use App\Entity\Tool;
 use App\Enum\Department;
+use App\Enum\SortBy;
+use App\Enum\SortOrder;
 use App\Enum\ToolStatus;
 use App\State\Provider\ToolCollectionProvider;
 use App\State\Provider\ToolItemProvider;
@@ -31,6 +35,10 @@ use Symfony\Component\Serializer\Encoder\JsonEncoder;
                 self::PARAM_MIN_COST => new PositiveNumberQueryParameter(),
                 self::PARAM_MAX_COST => new PositiveNumberQueryParameter(),
                 self::PARAM_CATEGORY => new StringQueryParameter(),
+                self::PARAM_PAGE => new PositiveIntegerQueryParameter(),
+                self::PARAM_LIMIT => new PositiveIntegerQueryParameter(maximum: ListToolsQuery::MAX_LIMIT),
+                self::PARAM_SORT_BY => new EnumQueryParameter(SortBy::VALUES),
+                self::PARAM_ORDER => new EnumQueryParameter(SortOrder::VALUES),
             ],
             provider: ToolCollectionProvider::class,
             output: ToolCollectionOutput::class,
@@ -56,4 +64,8 @@ final class ToolResource
     public const PARAM_MIN_COST = 'min_cost';
     public const PARAM_MAX_COST = 'max_cost';
     public const PARAM_CATEGORY = 'category';
+    public const PARAM_PAGE = 'page';
+    public const PARAM_LIMIT = 'limit';
+    public const PARAM_SORT_BY = 'sort_by';
+    public const PARAM_ORDER = 'order';
 }

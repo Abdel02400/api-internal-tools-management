@@ -4,8 +4,10 @@ namespace App\State\Provider;
 
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProviderInterface;
+use App\ApiResource\Tool\ToolResource;
 use App\Dto\Tool\Output\ToolCollectionOutput;
 use App\Dto\Tool\Output\ToolOutput;
+use App\Dto\Tool\Query\ListToolsQuery;
 use App\Entity\Tool;
 use App\Factory\Tool\ListToolsQueryFactory;
 use App\Http\ApiMessage;
@@ -36,32 +38,85 @@ final readonly class ToolCollectionProvider implements ProviderInterface
             throw new ValidationFailedException($query, $violations);
         }
 
-        $tools = $this->toolRepository->search($query);
         $total = $this->toolRepository->countAll();
-        $hasFilters = $query->hasFilters();
+        $filteredCount = $query->hasFilters() ? $this->toolRepository->countMatching($query) : $total;
+
+        $tools = $this->toolRepository->search($query);
 
         $data = array_map(
             fn (Tool $tool): ToolOutput => $this->mapper->toOutput($tool),
             $tools,
         );
 
+        $paginationApplied = $this->buildPaginationApplied($query, $filteredCount);
+
         return new ToolCollectionOutput(
             data: $data,
             total: $total,
-            filtered: $hasFilters ? count($tools) : null,
-            filtersApplied: $hasFilters ? $query->toFilterArray() : null,
+            filtered: $query->hasFilters() ? $filteredCount : null,
+            filtersApplied: $query->hasFilters() ? $query->toFilterArray() : null,
+            paginationApplied: $paginationApplied,
+            sortApplied: $this->buildSortApplied($query),
             message: $this->resolveMessage(
                 total: $total,
                 resultCount: count($tools),
-                hasFilters: $hasFilters,
+                hasFilters: $query->hasFilters(),
+                paginationApplied: $paginationApplied,
+                page: $query->effectivePage(),
             ),
         );
     }
 
-    private function resolveMessage(int $total, int $resultCount, bool $hasFilters): ?string
+    /**
+     * @return array{page: int, limit: int, total_pages: int}|null
+     */
+    private function buildPaginationApplied(ListToolsQuery $query, int $filteredCount): ?array
     {
+        if (!$query->hasPagination()) {
+            return null;
+        }
+
+        $limit = $query->effectiveLimit();
+        $totalPages = $filteredCount > 0 ? (int) ceil($filteredCount / $limit) : 0;
+
+        return [
+            'page' => $query->effectivePage(),
+            'limit' => $limit,
+            'total_pages' => $totalPages,
+        ];
+    }
+
+    /**
+     * @return array{sort_by: string|null, order: string}|null
+     */
+    private function buildSortApplied(ListToolsQuery $query): ?array
+    {
+        if (!$query->hasSort()) {
+            return null;
+        }
+
+        return [
+            ToolResource::PARAM_SORT_BY => $query->sortBy?->value,
+            ToolResource::PARAM_ORDER => $query->effectiveOrder()->value,
+        ];
+    }
+
+    /**
+     * @param array{page: int, limit: int, total_pages: int}|null $paginationApplied
+     */
+    private function resolveMessage(
+        int $total,
+        int $resultCount,
+        bool $hasFilters,
+        ?array $paginationApplied,
+        int $page,
+    ): ?string {
         if ($total === 0) {
             return ApiMessage::noResourceAvailable(Tool::TABLE_NAME);
+        }
+
+        if ($paginationApplied !== null && $page > $paginationApplied['total_pages']) {
+            return ApiMessage::pageOutOfRange($paginationApplied['total_pages']);
         }
 
         if ($hasFilters && $resultCount === 0) {

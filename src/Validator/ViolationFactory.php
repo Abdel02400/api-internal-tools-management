@@ -13,8 +13,18 @@ final class ViolationFactory
 
     public static function numeric(string $field, mixed $value): ConstraintViolation
     {
+        return self::build($field, $value, ValidationMessage::MUST_BE_NUMBER);
+    }
+
+    public static function integer(string $field, mixed $value): ConstraintViolation
+    {
+        return self::build($field, $value, ValidationMessage::MUST_BE_INTEGER);
+    }
+
+    private static function build(string $field, mixed $value, string $message): ConstraintViolation
+    {
         return new ConstraintViolation(
-            message: ValidationMessage::MUST_BE_NUMBER,
+            message: $message,
             messageTemplate: null,
             parameters: [],
             root: null,

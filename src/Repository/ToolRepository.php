@@ -4,7 +4,9 @@ namespace App\Repository;
 
 use App\Dto\Tool\Query\ListToolsQuery;
 use App\Entity\Tool;
+use App\Enum\SortBy;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\ORM\QueryBuilder;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
@@ -22,10 +24,38 @@ final class ToolRepository extends ServiceEntityRepository
      */
     public function search(ListToolsQuery $query): array
     {
+        $qb = $this->buildFilteredQuery($query);
+
+        $this->applySort($qb, $query);
+        $this->applyPagination($qb, $query);
+
+        /** @var list<Tool> */
+        return $qb->getQuery()->getResult();
+    }
+
+    public function countMatching(ListToolsQuery $query): int
+    {
+        $qb = $this->buildFilteredQuery($query);
+
+        return (int) $qb
+            ->select('COUNT(DISTINCT t.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
+
+    public function countAll(): int
+    {
+        return (int) $this->createQueryBuilder('t')
+            ->select('COUNT(t.id)')
+            ->getQuery()
+            ->getSingleScalarResult();
+    }
+
+    private function buildFilteredQuery(ListToolsQuery $query): QueryBuilder
+    {
         $qb = $this->createQueryBuilder('t')
             ->leftJoin('t.category', 'c')
-            ->addSelect('c')
-            ->orderBy('t.id', 'ASC');
+            ->addSelect('c');
 
         if ($query->department !== null) {
             $qb->andWhere('t.ownerDepartment = :department')
@@ -52,15 +82,33 @@ final class ToolRepository extends ServiceEntityRepository
                 ->setParameter('category', $query->category);
         }
 
-        /** @var list<Tool> */
-        return $qb->getQuery()->getResult();
+        return $qb;
     }
 
-    public function countAll(): int
+    private function applySort(QueryBuilder $qb, ListToolsQuery $query): void
     {
-        return (int) $this->createQueryBuilder('t')
-            ->select('COUNT(t.id)')
-            ->getQuery()
-            ->getSingleScalarResult();
+        $direction = $query->effectiveOrder()->value;
+
+        $column = match ($query->sortBy) {
+            SortBy::Cost => 't.monthlyCost',
+            SortBy::Name => 't.name',
+            SortBy::Date => 't.createdAt',
+            null => 't.id',
+        };
+
+        $qb->orderBy($column, $direction);
+    }
+
+    private function applyPagination(QueryBuilder $qb, ListToolsQuery $query): void
+    {
+        if (!$query->hasPagination()) {
+            return;
+        }
+
+        $page = $query->effectivePage();
+        $limit = $query->effectiveLimit();
+
+        $qb->setFirstResult(($page - 1) * $limit)
+            ->setMaxResults($limit);
     }
 }
