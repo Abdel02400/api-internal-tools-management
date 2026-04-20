@@ -7,9 +7,11 @@ use ApiPlatform\OpenApi\Model\Example;
 use ApiPlatform\OpenApi\Model\MediaType;
 use ApiPlatform\OpenApi\Model\Operation as OpenApiOperation;
 use ApiPlatform\OpenApi\Model\PathItem;
+use ApiPlatform\OpenApi\Model\RequestBody;
 use ApiPlatform\OpenApi\Model\Response;
 use ApiPlatform\OpenApi\OpenApi;
 use App\ApiResource\Tool\ToolResource;
+use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
 use App\OpenApi\Example\ToolDetailExample;
@@ -66,6 +68,8 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
 
     private function enrichOperation(string $path, string $method, OpenApiOperation $operation): OpenApiOperation
     {
+        $operation = $this->enrichRequestBody($path, $method, $operation);
+
         $responses = $operation->getResponses() ?? [];
 
         $successCode = $method === 'post' ? '201' : '200';
@@ -73,7 +77,8 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             $responses[$successCode] = $this->enrichSuccessResponse($path, $method, $responses[$successCode]);
         }
 
-        $responses['400'] = $this->validationErrorResponse($path);
+        $responses['400'] = $this->validationErrorResponse($path, $method);
+        unset($responses['422']);
 
         if ($this->supportsNotFound($path, $method)) {
             $responses['404'] = $this->notFoundResponse($path);
@@ -82,6 +87,24 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         $responses['500'] = $this->internalErrorResponse();
 
         return $operation->withResponses($responses);
+    }
+
+    private function enrichRequestBody(string $path, string $method, OpenApiOperation $operation): OpenApiOperation
+    {
+        if ($method !== 'post' || !$this->isCollectionPath($path)) {
+            return $operation;
+        }
+
+        $requestBody = $operation->getRequestBody();
+        if (!$requestBody instanceof RequestBody) {
+            return $operation;
+        }
+
+        return $operation->withRequestBody($requestBody->withContent(new ArrayObject([
+            'application/json' => new MediaType(
+                example: CreateToolExample::INPUT,
+            ),
+        ])));
     }
 
     private function enrichSuccessResponse(string $path, string $method, Response $response): Response
@@ -101,11 +124,7 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
      */
     private function successExamples(string $path, string $method): ?array
     {
-        if ($method !== 'get') {
-            return null;
-        }
-
-        if ($this->isCollectionPath($path)) {
+        if ($method === 'get' && $this->isCollectionPath($path)) {
             return [
                 'no_filters' => $this->example(
                     'GET /api/tools — liste complète, sans filtre ni pagination',
@@ -134,7 +153,7 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
-        if ($this->isItemPath($path)) {
+        if ($method === 'get' && $this->isItemPath($path)) {
             return [
                 'found' => $this->example(
                     'GET /api/tools/5 — détail complet',
@@ -143,6 +162,15 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
                 'low_usage' => $this->example(
                     'GET /api/tools/12 — outil peu utilisé (0 session sur 30j)',
                     ToolDetailExample::LOW_USAGE,
+                ),
+            ];
+        }
+
+        if ($method === 'post' && $this->isCollectionPath($path)) {
+            return [
+                'created' => $this->example(
+                    'POST /api/tools — outil créé (201)',
+                    CreateToolExample::CREATED,
                 ),
             ];
         }
@@ -161,8 +189,28 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         );
     }
 
-    private function validationErrorResponse(string $path): Response
+    private function validationErrorResponse(string $path, string $method): Response
     {
+        if ($method === 'post' && $this->isCollectionPath($path)) {
+            return new Response(
+                description: 'Validation failed — body rejected (field constraints or unknown fields in strict JSON mode)',
+                content: new ArrayObject([
+                    'application/json' => new MediaType(
+                        examples: new ArrayObject([
+                            'field_errors' => $this->example(
+                                'Corps avec plusieurs violations de champ',
+                                CreateToolExample::VALIDATION_ERRORS,
+                            ),
+                            'unknown_fields' => $this->example(
+                                'Corps avec champs inconnus (strict JSON)',
+                                CreateToolExample::UNKNOWN_FIELDS,
+                            ),
+                        ]),
+                    ),
+                ]),
+            );
+        }
+
         $example = $this->isItemPath($path)
             ? ErrorResponseExample::ID_NOT_INTEGER
             : ErrorResponseExample::VALIDATION_FAILED;

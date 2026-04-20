@@ -2,6 +2,7 @@
 
 namespace App\Mapper;
 
+use App\Dto\Tool\Output\ToolCreatedOutput;
 use App\Dto\Tool\Output\ToolDetailOutput;
 use App\Dto\Tool\Output\ToolOutput;
 use App\Dto\Tool\Output\UsageMetricsOutput;
@@ -46,6 +47,24 @@ final class ToolMapper
             createdAt: $tool->getCreatedAt() ?? throw InvalidToolStateException::missingField('createdAt'),
             updatedAt: $tool->getUpdatedAt() ?? throw InvalidToolStateException::missingField('updatedAt'),
             usageMetrics: $usageMetrics,
+        );
+    }
+
+    public function toCreatedOutput(Tool $tool): ToolCreatedOutput
+    {
+        return new ToolCreatedOutput(
+            id: $tool->getId() ?? throw InvalidToolStateException::notPersisted(),
+            name: $tool->getName(),
+            description: $tool->getDescription(),
+            vendor: $tool->getVendor(),
+            websiteUrl: $tool->getWebsiteUrl(),
+            category: $tool->getCategory()->getName(),
+            monthlyCost: (float) $tool->getMonthlyCost(),
+            ownerDepartment: $tool->getOwnerDepartment(),
+            status: $tool->getStatus(),
+            activeUsersCount: $tool->getActiveUsersCount(),
+            createdAt: $tool->getCreatedAt() ?? throw InvalidToolStateException::missingField('createdAt'),
+            updatedAt: $tool->getUpdatedAt() ?? throw InvalidToolStateException::missingField('updatedAt'),
         );
     }
 }

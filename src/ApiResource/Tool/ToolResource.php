@@ -5,11 +5,14 @@ namespace App\ApiResource\Tool;
 use ApiPlatform\Metadata\ApiResource;
 use ApiPlatform\Metadata\Get;
 use ApiPlatform\Metadata\GetCollection;
+use ApiPlatform\Metadata\Post;
 use App\ApiResource\QueryParameter\EnumQueryParameter;
 use App\ApiResource\QueryParameter\PositiveIntegerQueryParameter;
 use App\ApiResource\QueryParameter\PositiveNumberQueryParameter;
 use App\ApiResource\QueryParameter\StringQueryParameter;
+use App\Dto\Tool\Input\CreateToolInput;
 use App\Dto\Tool\Output\ToolCollectionOutput;
+use App\Dto\Tool\Output\ToolCreatedOutput;
 use App\Dto\Tool\Output\ToolDetailOutput;
 use App\Dto\Tool\Query\ListToolsQuery;
 use App\Entity\Tool;
@@ -17,9 +20,12 @@ use App\Enum\Department;
 use App\Enum\SortBy;
 use App\Enum\SortOrder;
 use App\Enum\ToolStatus;
+use App\State\Processor\ToolPersistProcessor;
 use App\State\Provider\ToolCollectionProvider;
 use App\State\Provider\ToolItemProvider;
 use Symfony\Component\Serializer\Encoder\JsonEncoder;
+use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
+use Symfony\Component\Serializer\Normalizer\DenormalizerInterface;
 
 #[ApiResource(
     class: Tool::class,
@@ -47,6 +53,16 @@ use Symfony\Component\Serializer\Encoder\JsonEncoder;
             uriTemplate: self::URI_ITEM,
             provider: ToolItemProvider::class,
             output: ToolDetailOutput::class,
+        ),
+        new Post(
+            uriTemplate: self::URI_BASE,
+            input: CreateToolInput::class,
+            processor: ToolPersistProcessor::class,
+            output: ToolCreatedOutput::class,
+            denormalizationContext: [
+                AbstractNormalizer::ALLOW_EXTRA_ATTRIBUTES => false,
+                DenormalizerInterface::COLLECT_DENORMALIZATION_ERRORS => true,
+            ],
         ),
     ],
 )]

@@ -304,6 +304,10 @@ Un `ApiExceptionSubscriber` intercepte toutes les exceptions levées sur les rou
 | **400** | `{ error: "Validation failed", details: { field: msg } }` | `ValidationFailedException` (Symfony) ou `ConstraintViolationListAwareExceptionInterface` (AP) |
 | **404** | `{ error: "Tool not found", message: "Tool with ID X does not exist" }` | `ToolNotFoundException` |
 | **404** | `{ error: "Resource not found", message: "..." }` | Autre `NotFoundHttpException` (route non trouvée, etc.) |
+| **400** | `{ error: "Validation failed", details: { body: "Malformed JSON body" } }` | `NotEncodableValueException` (JSON invalide) |
+| **400** | `{ error: "Validation failed", details: { <field>: "Unknown field" } }` | `ExtraAttributesException` (strict JSON) |
+| **400** | `{ error: "Validation failed", details: { <field>: "This field is required" } }` | `MissingConstructorArgumentsException` |
+| **400** | `{ error: "Validation failed", details: { <field>: "..." } }` | `PartialDenormalizationException` (types/enums invalides, cumulés) |
 | **500** | `{ error: "Internal server error", message: "Database connection failed" }` | `Doctrine\DBAL\Exception` — message standardisé |
 | **500** | `{ error: "Internal server error", message: "..." }` | Tout le reste — message brut en dev, **message générique en prod** via `%kernel.debug%` |
 
@@ -358,6 +362,92 @@ Pagination et tri ne sont **pas des filtres** — ils ne réduisent pas le jeu d
 
 `total_pages` se base sur le **filtered count** (pas le total global), donc reflète le nombre de pages réellement disponibles pour la requête courante. Si `page > total_pages` → data vide + message `"Page exceeds available range (max page: X)"`.
 
+## `POST /api/tools` — création
+
+### Flux
+
+```
+┌─────────────────────────────────────────────┐
+│ Serializer Symfony (strict JSON)            │ ← rejet champs inconnus + collect denormalization errors
+│                                             │   → PartialDenormalizationException si types invalides
+│                                             │   → ExtraAttributesException si champs inconnus
+│                                             │   → NotEncodableValueException si JSON malformé
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ ValidatorInterface (auto AP)                │ ← Asserts + contraintes custom
+│                                             │   → ValidationFailedException (cumulée)
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ ToolPersistProcessor                        │
+├─────────────────────────────────────────────┤
+│ 1. CategoryRepository->find(categoryId)     │ ← garde-fou "race condition" (validé en amont)
+│ 2. new Tool($name, $category, $cost, $dept) │ ← status & active_users_count = defaults entité
+│ 3. setDescription/setVendor/setWebsiteUrl   │
+│ 4. em->persist + em->flush                  │
+│ 5. ToolMapper->toCreatedOutput($tool)       │ → ToolCreatedOutput (12 champs du spec)
+└─────────────────────────────────────────────┘
+```
+
+### Validations (CreateToolInput)
+
+| Champ | Contraintes |
+|---|---|
+| `name` | `NotBlank`, `Length(2-100)`, **`UniqueToolName`** (contrainte custom DB) |
+| `category_id` | `Positive`, **`ExistingCategory`** (contrainte custom DB) |
+| `monthly_cost` | `GreaterThanOrEqual(0)`, `Regex /^\d+(\.\d{1,2})?$/` (max 2 décimales) |
+| `owner_department` | Typé `Department` (enum — invalide → 400 via `PartialDenormalizationException`) |
+| `vendor` | `NotBlank`, `Length(max: 100)` |
+| `description` | Optional, pas de contrainte (colonne `TEXT` libre) |
+| `website_url` | Optional, `Url`, `Length(max: 255)` |
+
+### Contraintes custom DB-dépendantes (`src/Validator/Constraint/`)
+
+- **`UniqueToolName`** — query `ToolRepository::findOneBy(['name' => ...])`. Message centralisé (`NAME_ALREADY_EXISTS`).
+- **`ExistingCategory`** — query `CategoryRepository::find($id)`. Message centralisé (`CATEGORY_NOT_FOUND`).
+
+Ces contraintes passent par le flow `ValidationFailedException` classique → 400 unifié (même format que les autres violations).
+
+### Strict JSON (rejet champs inconnus) — POST et PUT
+
+Activé au **niveau opération** (pas global) via `denormalizationContext` :
+
+```php
+denormalizationContext: [
+    AbstractNormalizer::ALLOW_EXTRA_ATTRIBUTES => false,
+    DenormalizerInterface::COLLECT_DENORMALIZATION_ERRORS => true,
+],
+```
+
+- **`ALLOW_EXTRA_ATTRIBUTES => false`** — toute clé non déclarée dans `CreateToolInput` fait throw `ExtraAttributesException` → 400 `{<field>: "Unknown field"}`.
+- **`COLLECT_DENORMALIZATION_ERRORS => true`** — agrège toutes les erreurs de type/dénormalisation dans une seule `PartialDenormalizationException` au lieu de throw à la première → le client voit **toutes** les erreurs d'un coup. Combiné avec la validation Asserts (qui cumule déjà via `ConstraintViolationList`), le comportement est cohérent : **un seul 400 avec toutes les violations**, peu importe leur nature.
+
+Cas couverts par `ApiExceptionSubscriber::extractDeserializationDetails()` :
+
+| Exception | HTTP | Shape |
+|---|---|---|
+| `NotEncodableValueException` | 400 | `{body: "Malformed JSON body"}` |
+| `ExtraAttributesException` | 400 | `{<field>: "Unknown field"}` |
+| `MissingConstructorArgumentsException` | 400 | `{<field>: "This field is required"}` |
+| `PartialDenormalizationException` | 400 | `{<field>: "...type error..."}` (agrège les erreurs de types invalides, enums non-matchés, etc.) |
+
+### Shape de la réponse 201
+
+Nouveau DTO dédié `ToolCreatedOutput` qui colle exactement au spec (12 champs) — ni `total_monthly_cost` ni `usage_metrics` (qui seraient triviaux à 0 juste après création). Pas de réutilisation de `ToolDetailOutput` pour ne pas renvoyer de champs absents du contrat.
+
+```json
+{
+  "id": 25, "name": "Linear", "description": "...", "vendor": "Linear",
+  "website_url": "https://linear.app", "category": "Development",
+  "monthly_cost": 8.00, "owner_department": "Engineering",
+  "status": "active", "active_users_count": 0,
+  "created_at": "...", "updated_at": "..."
+}
+```
+
+Le `status` par défaut (`active`) vient du default property de l'entité (`Tool::$status = ToolStatus::Active`), pas du processor — cohérent avec le pattern "entity owns its invariants".
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -368,7 +458,8 @@ Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir 
 Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour séparer la logique de factory de la data :
 - `ErrorResponseExample` — 400, 404, 500 reference payloads
 - `ToolCollectionExample` — 6 cas de réponse pour `GET /api/tools`
-- `ToolDetailExample` — réponse type pour `GET /api/tools/{id}`
+- `ToolDetailExample` — 2 exemples `GET /api/tools/{id}` (détail complet + outil peu utilisé)
+- `CreateToolExample` — body d'entrée, 201, 400 (field errors + unknown fields)
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -388,8 +479,8 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/Tool/
-│   │   ├── Input/                    # DTOs POST/PUT (à venir)
-│   │   ├── Output/                   # DTOs GET responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, UsageMetricsOutput, UsageWindowOutput)
+│   │   ├── Input/                    # DTOs body POST/PUT (CreateToolInput — Asserts + contraintes custom DB)
+│   │   ├── Output/                   # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolCreatedOutput, Usage*)
 │   │   └── Query/                    # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
 │   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder)
@@ -406,8 +497,11 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │   ├── Example/                  # Constantes d'exemples JSON (ErrorResponse, ToolCollection, ToolDetail)
 │   │   └── OpenApiFactory.php        # Decorator enrichissant Swagger (exemples 200 + réponses 400/404/500)
 │   ├── Repository/                   # ToolRepository (ORM), UsageLogRepository (DBAL natif pour `usage_logs` non mappée)
-│   ├── State/Provider/               # ToolCollectionProvider, ToolItemProvider
+│   ├── State/
+│   │   ├── Processor/                # ToolPersistProcessor (POST create)
+│   │   └── Provider/                 # ToolCollectionProvider, ToolItemProvider
 │   ├── Validator/
+│   │   ├── Constraint/               # Contraintes custom (UniqueToolName, ExistingCategory) + validators
 │   │   ├── Message/ValidationMessage.php  # Messages d'erreur génériques
 │   │   └── ViolationFactory.php           # Factory pour ConstraintViolation
 │   └── ValueObject/Number/           # NullableFloat, NullableInt — parsing typé safe

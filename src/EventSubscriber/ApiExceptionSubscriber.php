@@ -6,6 +6,7 @@ use ApiPlatform\Validator\Exception\ConstraintViolationListAwareExceptionInterfa
 use App\ApiResource\Tool\ToolResource;
 use App\Exception\Http\ToolNotFoundException;
 use App\Http\ApiResponse;
+use App\Validator\Message\ValidationMessage;
 use Doctrine\DBAL\Exception as DbalException;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -14,6 +15,10 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Event\ExceptionEvent;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelEvents;
+use Symfony\Component\Serializer\Exception\ExtraAttributesException;
+use Symfony\Component\Serializer\Exception\MissingConstructorArgumentsException;
+use Symfony\Component\Serializer\Exception\NotEncodableValueException;
+use Symfony\Component\Serializer\Exception\PartialDenormalizationException;
 use Symfony\Component\Serializer\NameConverter\CamelCaseToSnakeCaseNameConverter;
 use Symfony\Component\Serializer\NameConverter\NameConverterInterface;
 use Symfony\Component\Validator\ConstraintViolationListInterface;
@@ -35,6 +40,8 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
      * Doit rester > à celle d'API Platform (-96) pour intercepter avant son listener natif.
      */
     private const LISTENER_PRIORITY = 10;
+
+    private const BODY_FIELD = 'body';
 
     private NameConverterInterface $nameConverter;
 
@@ -83,6 +90,11 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
             return $this->validationResponse($violations);
         }
 
+        $deserializationDetails = $this->extractDeserializationDetails($exception);
+        if ($deserializationDetails !== null) {
+            return ApiResponse::validationFailed($deserializationDetails);
+        }
+
         if ($exception instanceof ToolNotFoundException) {
             return ApiResponse::notFound(
                 ToolNotFoundException::ERROR_TITLE,
@@ -111,6 +123,43 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
 
         if ($exception instanceof ConstraintViolationListAwareExceptionInterface) {
             return $exception->getConstraintViolationList();
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array<string, string>|null
+     */
+    private function extractDeserializationDetails(Throwable $exception): ?array
+    {
+        if ($exception instanceof NotEncodableValueException) {
+            return [self::BODY_FIELD => ValidationMessage::MALFORMED_JSON];
+        }
+
+        if ($exception instanceof ExtraAttributesException) {
+            $details = [];
+            foreach ($exception->getExtraAttributes() as $attribute) {
+                $details[$this->nameConverter->normalize($attribute)] = ValidationMessage::UNKNOWN_FIELD;
+            }
+            return $details;
+        }
+
+        if ($exception instanceof MissingConstructorArgumentsException) {
+            $details = [];
+            foreach ($exception->getMissingConstructorArguments() as $argument) {
+                $details[$this->nameConverter->normalize($argument)] = ValidationMessage::FIELD_REQUIRED;
+            }
+            return $details;
+        }
+
+        if ($exception instanceof PartialDenormalizationException) {
+            $details = [];
+            foreach ($exception->getErrors() as $error) {
+                $path = $error->getPath() ?? self::BODY_FIELD;
+                $details[$this->nameConverter->normalize($path)] = $error->getMessage();
+            }
+            return $details;
         }
 
         return null;
