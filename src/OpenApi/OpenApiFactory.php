@@ -12,9 +12,11 @@ use ApiPlatform\OpenApi\Model\Response;
 use ApiPlatform\OpenApi\OpenApi;
 use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
 use App\ApiResource\Analytics\ExpensiveToolAnalyticsResource;
+use App\ApiResource\Analytics\ToolsByCategoryAnalyticsResource;
 use App\ApiResource\Tool\ToolResource;
 use App\OpenApi\Example\Analytics\DepartmentCostExample;
 use App\OpenApi\Example\Analytics\ExpensiveToolExample;
+use App\OpenApi\Example\Analytics\ToolsByCategoryExample;
 use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
@@ -82,7 +84,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             $responses[$successCode] = $this->enrichSuccessResponse($path, $method, $responses[$successCode]);
         }
 
-        $responses['400'] = $this->validationErrorResponse($path, $method);
+        if ($this->canProduce400($operation)) {
+            $responses['400'] = $this->validationErrorResponse($path, $method);
+        } else {
+            unset($responses['400']);
+        }
         unset($responses['422']);
 
         if ($this->supportsNotFound($path, $method)) {
@@ -234,6 +240,19 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'get' && $this->isToolsByCategoryPath($path)) {
+            return [
+                'with_data' => $this->example(
+                    'GET /api/analytics/tools-by-category — répartition par catégorie',
+                    ToolsByCategoryExample::DATA,
+                ),
+                'empty_db' => $this->example(
+                    'GET /api/analytics/tools-by-category — aucun outil actif en DB',
+                    ToolsByCategoryExample::EMPTY_DB,
+                ),
+            ];
+        }
+
         return null;
     }
 
@@ -245,6 +264,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function isExpensiveToolsPath(string $path): bool
     {
         return rtrim($path, '/') === $this->apiPrefix . ExpensiveToolAnalyticsResource::URI;
+    }
+
+    private function isToolsByCategoryPath(string $path): bool
+    {
+        return rtrim($path, '/') === $this->apiPrefix . ToolsByCategoryAnalyticsResource::URI;
     }
 
     /**
@@ -349,6 +373,21 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function supportsNotFound(string $path, string $method): bool
     {
         return $this->isItemPath($path) || in_array($method, ['put', 'patch', 'delete'], true);
+    }
+
+    /**
+     * Un 400 n'a de sens que si l'opération a au moins un input que le client peut casser —
+     * query params, path variables ou requestBody. Sinon on ne le documente pas
+     * (ex: `GET /api/analytics/tools-by-category` n'a aucun input → aucun 400 possible).
+     */
+    private function canProduce400(OpenApiOperation $operation): bool
+    {
+        $parameters = $operation->getParameters();
+        if ($parameters !== null && count($parameters) > 0) {
+            return true;
+        }
+
+        return $operation->getRequestBody() !== null;
     }
 
     private function isCollectionPath(string $path): bool

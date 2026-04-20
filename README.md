@@ -718,6 +718,64 @@ Centralisé dans `src/Helper/EfficiencyClassifier::classify()`. Réutilisable po
 
 Les 2 messages distincts (réutilisés depuis `ApiMessage`) permettent au client de différencier "filtre trop restrictif" (résultat normal) vs "aucune donnée dispo" (problème source).
 
+## Analytics — `GET /api/analytics/tools-by-category`
+
+Répartition des outils par catégorie. Aucun query param — l'endpoint retourne toujours l'agrégation complète (triée par coût décroissant).
+
+### Flux
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ToolsByCategoryCollectionProvider                   │ ← provider minimal (pas de DTO query,
+│                                                     │   pas de validator call)
+│  repository->aggregate() → mapper->toCollection()   │
+└─────────────────────────────────────────────────────┘
+```
+
+Pas de `QueryDto`/`QueryFactory` puisque pas de params à parser — le provider appelle directement le repository. Cohérent avec le principe "pas de ceremonial pour rien" qui guide le reste du code.
+
+### SQL
+
+```sql
+SELECT
+    c.name AS category_name,
+    COUNT(t.id) AS tools_count,
+    SUM(t.monthly_cost) AS total_cost,
+    SUM(t.active_users_count) AS total_users,
+    CASE
+        WHEN SUM(t.active_users_count) > 0
+        THEN SUM(t.monthly_cost) / SUM(t.active_users_count)
+        ELSE NULL
+    END AS average_cost_per_user
+FROM categories c
+INNER JOIN tools t ON t.category_id = c.id
+WHERE t.status = 'active'
+GROUP BY c.id, c.name
+ORDER BY total_cost DESC
+```
+
+- **INNER JOIN** : les catégories sans outil actif sont naturellement exclues. Cohérent avec `department-costs` (un département sans outil → absent).
+- **`CASE WHEN` sur `average_cost_per_user`** : gère la division par zéro au niveau SQL. Si toute la catégorie a 0 user, l'agrégat est `NULL` → le mapper omet le champ et la catégorie est excluse du calcul `most_efficient_category`.
+
+### Règles métier (clarifications spec)
+
+| Champ | Règle |
+|---|---|
+| `total_users` | Somme des `active_users_count`, **pas de déduplication** (un user peut utiliser plusieurs outils → il compte plusieurs fois) |
+| `percentage_of_budget` | `(catégorie.total_cost / company.total_cost) × 100`, somme = 100% (tolérance ±0.1%) |
+| `average_cost_per_user` | `SUM(cost) / SUM(users)` par catégorie ; **omis** si 0 users (div/0 via `skip_null_values`) |
+| `most_expensive_category` | Plus haut `total_cost`. Tie-break alphabétique ASC. |
+| `most_efficient_category` | Plus bas `average_cost_per_user` **non-null** (catégories sans users exclues). Tie-break alphabétique ASC. `null` si aucune catégorie n'a de users. |
+
+### Shape contextuelle
+
+| Scénario | Shape |
+|---|---|
+| Données présentes | `{ data: [...], insights: { most_expensive_category, most_efficient_category } }` |
+| Aucun outil actif | `{ data: [], insights: {}, message: "No analytics data available - ..." }` |
+
+Les deux champs d'`insights` sont nullable dans `ToolsByCategoryInsights` → omis via `skip_null_values` si pas de données.
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -733,6 +791,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `UpdateToolExample` — body partiel, 200, 400 (field errors + id invalide + unknown fields)
 - `Analytics\DepartmentCostExample` — GET analytics department-costs, 200 (données présentes + empty DB)
 - `Analytics\ExpensiveToolExample` — GET analytics expensive-tools, 200 (with_data + no_match + empty_db) + 400
+- `Analytics\ToolsByCategoryExample` — GET analytics tools-by-category, 200 (with_data + empty_db)
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
