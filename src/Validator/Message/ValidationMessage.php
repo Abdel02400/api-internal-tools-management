@@ -24,5 +24,5 @@ final class ValidationMessage
     // Messages spécifiques aux endpoints Analytics (Part 2 spec — "Invalid analytics parameter")
     public const ANALYTICS_LIMIT = 'Must be positive integer between 1 and 100';
     public const ANALYTICS_POSITIVE_NUMBER = 'Must be a positive number';
-    public const ANALYTICS_POSITIVE_INTEGER = 'Must be a positive integer';
+    public const ANALYTICS_MAX_USERS = 'Must be a non-negative integer';
 }

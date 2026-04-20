@@ -202,7 +202,7 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
         return match ($field) {
             'limit' => ValidationMessage::ANALYTICS_LIMIT,
             'min_cost', 'max_cost' => ValidationMessage::ANALYTICS_POSITIVE_NUMBER,
-            'max_users' => ValidationMessage::ANALYTICS_POSITIVE_INTEGER,
+            'max_users' => ValidationMessage::ANALYTICS_MAX_USERS,
             default => ValidationMessage::INVALID_VALUE,
         };
     }

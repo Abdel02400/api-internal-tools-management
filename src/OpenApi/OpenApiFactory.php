@@ -12,10 +12,12 @@ use ApiPlatform\OpenApi\Model\Response;
 use ApiPlatform\OpenApi\OpenApi;
 use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
 use App\ApiResource\Analytics\ExpensiveToolAnalyticsResource;
+use App\ApiResource\Analytics\LowUsageToolAnalyticsResource;
 use App\ApiResource\Analytics\ToolsByCategoryAnalyticsResource;
 use App\ApiResource\Tool\ToolResource;
 use App\OpenApi\Example\Analytics\DepartmentCostExample;
 use App\OpenApi\Example\Analytics\ExpensiveToolExample;
+use App\OpenApi\Example\Analytics\LowUsageToolExample;
 use App\OpenApi\Example\Analytics\ToolsByCategoryExample;
 use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
@@ -253,6 +255,19 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'get' && $this->isLowUsageToolsPath($path)) {
+            return [
+                'with_data' => $this->example(
+                    'GET /api/analytics/low-usage-tools?max_users=5 — outils sous-utilisés',
+                    LowUsageToolExample::DATA,
+                ),
+                'empty_db' => $this->example(
+                    'GET /api/analytics/low-usage-tools — aucun outil actif en DB',
+                    LowUsageToolExample::EMPTY_DB,
+                ),
+            ];
+        }
+
         return null;
     }
 
@@ -269,6 +284,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function isToolsByCategoryPath(string $path): bool
     {
         return rtrim($path, '/') === $this->apiPrefix . ToolsByCategoryAnalyticsResource::URI;
+    }
+
+    private function isLowUsageToolsPath(string $path): bool
+    {
+        return rtrim($path, '/') === $this->apiPrefix . LowUsageToolAnalyticsResource::URI;
     }
 
     /**
@@ -317,6 +337,7 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         $example = match (true) {
             $this->isDepartmentCostsPath($path) => DepartmentCostExample::VALIDATION_ERROR,
             $this->isExpensiveToolsPath($path) => ExpensiveToolExample::VALIDATION_ERROR,
+            $this->isLowUsageToolsPath($path) => LowUsageToolExample::VALIDATION_ERROR,
             $this->isItemPath($path) => ErrorResponseExample::ID_NOT_INTEGER,
             default => ErrorResponseExample::VALIDATION_FAILED,
         };

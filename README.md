@@ -340,7 +340,7 @@ Mapping des messages (`ApiExceptionSubscriber::analyticsMessage()`) :
 |---|---|
 | `limit` | `"Must be positive integer between 1 and 100"` |
 | `min_cost`, `max_cost` | `"Must be a positive number"` |
-| `max_users` | `"Must be a positive integer"` |
+| `max_users` | `"Must be a non-negative integer"` |
 | autre (ex: `sort_by`, `order`) | `"Invalid value"` (fallback générique) |
 
 Les constantes vivent dans `ValidationMessage` (préfixe `ANALYTICS_*`). La méthode `ApiResponse::invalidAnalyticsParameter(array $details)` construit la JSON response.
@@ -776,6 +776,85 @@ ORDER BY total_cost DESC
 
 Les deux champs d'`insights` sont nullable dans `ToolsByCategoryInsights` → omis via `skip_null_values` si pas de données.
 
+## Analytics — `GET /api/analytics/low-usage-tools`
+
+Outils actifs sous-utilisés. Le CFO/IT director veut identifier des candidats à la résiliation ou au downgrade — l'endpoint attribue à chaque outil un `warning_level` basé sur son coût-par-user, et une `potential_action` prête à afficher.
+
+### Query params
+
+| Param | Type | Défaut | Contrainte |
+|---|---|---|---|
+| `max_users` | int | `5` | ≥ 0 |
+
+`max_users=0` est valide (filtrer les outils orphelins uniquement). D'où la nouvelle `NonNegativeIntegerQueryParameter` (minimum: 0) — la `PositiveIntegerQueryParameter` existante n'accepte que ≥ 1.
+
+### Flux
+
+```
+┌─────────────────────────────────────────────────────┐
+│ LowUsageToolsQueryFactory->create()                 │ ← parse max_users (entier, cumule violations)
+└─────────────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────────────┐
+│ LowUsageToolCollectionProvider                      │
+├─────────────────────────────────────────────────────┤
+│ 1. ValidatorInterface->validate($query)             │
+│ 2. repository->findUnderutilized($query)            │ ← WHERE active_users_count <= :max_users
+│ 3. LowUsageToolMapper->toCollection($rows)          │ ← classifie + agrège savings
+└─────────────────────────────────────────────────────┘
+```
+
+### SQL
+
+```sql
+SELECT t.id, t.name, t.monthly_cost, t.active_users_count,
+       t.vendor, t.owner_department AS department
+FROM tools t
+WHERE t.status = 'active'
+  AND t.active_users_count <= :max_users
+ORDER BY t.active_users_count ASC, t.monthly_cost DESC
+```
+
+Les outils à 0 users sont **toujours inclus** (0 ≤ n'importe quel seuil ≥ 0). Tri : moins utilisé d'abord, puis le plus coûteux en tête à égalité de users (priorité d'action pour le CFO).
+
+### Règles métier (clarifications spec)
+
+#### `warning_level` (enum `WarningLevel`)
+
+Basé sur `cost_per_user` (centralisé dans `src/Helper/WarningLevelClassifier`) :
+
+| `cost_per_user` | Level |
+|---|---|
+| < 20€ | `low` |
+| 20€ ≤ cpu ≤ 50€ | `medium` |
+| > 50€ | `high` |
+| Non calculable (0 users) | `high` **forcé** |
+
+#### `potential_action`
+
+Dérivé du `warning_level` via `WarningLevel::recommendedAction()` (méthode sur l'enum) :
+
+| Level | Action |
+|---|---|
+| `high` | `"Consider canceling or downgrading"` |
+| `medium` | `"Review usage and consider optimization"` |
+| `low` | `"Monitor usage trends"` |
+
+#### `potential_monthly_savings`
+
+Somme des `monthly_cost` des outils `high` **+** `medium` uniquement (les `low` sont surveillés mais pas candidats à suppression). `potential_annual_savings = potential_monthly_savings × 12`. Arrondis 2 décimales.
+
+#### `total_underutilized_tools`
+
+Count des outils retournés (le filtre `max_users` est appliqué en SQL → tous les rows qualifient).
+
+### Shape contextuelle
+
+| Scénario | Shape |
+|---|---|
+| Données présentes | `{ data: [...], savings_analysis: { total, monthly, annual } }` |
+| Aucun outil actif | `{ data: [], savings_analysis: { 0, 0, 0 }, message: "No analytics data..." }` |
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -792,6 +871,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `Analytics\DepartmentCostExample` — GET analytics department-costs, 200 (données présentes + empty DB)
 - `Analytics\ExpensiveToolExample` — GET analytics expensive-tools, 200 (with_data + no_match + empty_db) + 400
 - `Analytics\ToolsByCategoryExample` — GET analytics tools-by-category, 200 (with_data + empty_db)
+- `Analytics\LowUsageToolExample` — GET analytics low-usage-tools, 200 (with_data + empty_db) + 400
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -809,7 +889,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 ├── src/
 │   ├── ApiResource/
 │   │   ├── Analytics/                # Config AP pour les endpoints analytics (DepartmentCostAnalyticsResource, ...)
-│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, String)
+│   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, NonNegativeInteger, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/
 │   │   ├── Analytics/                # DTOs analytics par endpoint (DepartmentCost/{Query,Output}/, ...)
@@ -818,7 +898,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │       ├── Output/               # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
 │   │       └── Query/                # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
-│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy, EfficiencyRating)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy, EfficiencyRating, WarningLevel)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
 │   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
@@ -826,7 +906,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   ├── Factory/
 │   │   ├── Analytics/                # Factories query params pour analytics (DepartmentCostsQueryFactory, ...)
 │   │   └── Tool/                     # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
-│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast, EfficiencyClassifier — utilisés par la couche Analytics)
+│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast, EfficiencyClassifier, WarningLevelClassifier — utilisés par la couche Analytics)
 │   ├── Http/
 │   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
 │   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)
