@@ -2,7 +2,7 @@
 
 namespace App\Mapper;
 
-use App\Dto\Tool\Output\ToolCreatedOutput;
+use App\Dto\Tool\Output\ToolWriteOutput;
 use App\Dto\Tool\Output\ToolDetailOutput;
 use App\Dto\Tool\Output\ToolOutput;
 use App\Dto\Tool\Output\UsageMetricsOutput;
@@ -50,9 +50,9 @@ final class ToolMapper
         );
     }
 
-    public function toCreatedOutput(Tool $tool): ToolCreatedOutput
+    public function toWriteOutput(Tool $tool): ToolWriteOutput
     {
-        return new ToolCreatedOutput(
+        return new ToolWriteOutput(
             id: $tool->getId() ?? throw InvalidToolStateException::notPersisted(),
             name: $tool->getName(),
             description: $tool->getDescription(),

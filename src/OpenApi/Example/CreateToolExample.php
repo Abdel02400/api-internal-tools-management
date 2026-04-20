@@ -34,7 +34,7 @@ final class CreateToolExample
         'details' => [
             'name' => 'A tool with this name already exists',
             'monthly_cost' => 'Must have at most 2 decimals',
-            'owner_department' => 'The data must belong to a backed enumeration of type App\\Enum\\Department',
+            'owner_department' => 'Invalid value',
             'website_url' => 'Must be a valid URL',
             'category_id' => 'Category does not exist',
         ],

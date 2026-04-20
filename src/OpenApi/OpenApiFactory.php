@@ -15,6 +15,7 @@ use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
 use App\OpenApi\Example\ToolDetailExample;
+use App\OpenApi\Example\UpdateToolExample;
 use ArrayObject;
 use Symfony\Component\DependencyInjection\Attribute\AsDecorator;
 use Symfony\Component\DependencyInjection\Attribute\Autowire;
@@ -91,7 +92,8 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
 
     private function enrichRequestBody(string $path, string $method, OpenApiOperation $operation): OpenApiOperation
     {
-        if ($method !== 'post' || !$this->isCollectionPath($path)) {
+        $example = $this->requestBodyExample($path, $method);
+        if ($example === null) {
             return $operation;
         }
 
@@ -101,10 +103,24 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         }
 
         return $operation->withRequestBody($requestBody->withContent(new ArrayObject([
-            'application/json' => new MediaType(
-                example: CreateToolExample::INPUT,
-            ),
+            'application/json' => new MediaType(example: $example),
         ])));
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function requestBodyExample(string $path, string $method): ?array
+    {
+        if ($method === 'post' && $this->isCollectionPath($path)) {
+            return CreateToolExample::INPUT;
+        }
+
+        if ($method === 'put' && $this->isItemPath($path)) {
+            return UpdateToolExample::INPUT;
+        }
+
+        return null;
     }
 
     private function enrichSuccessResponse(string $path, string $method, Response $response): Response
@@ -175,6 +191,15 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'put' && $this->isItemPath($path)) {
+            return [
+                'updated' => $this->example(
+                    'PUT /api/tools/5 — outil mis à jour (200)',
+                    UpdateToolExample::UPDATED,
+                ),
+            ];
+        }
+
         return null;
     }
 
@@ -192,23 +217,33 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function validationErrorResponse(string $path, string $method): Response
     {
         if ($method === 'post' && $this->isCollectionPath($path)) {
-            return new Response(
-                description: 'Validation failed — body rejected (field constraints or unknown fields in strict JSON mode)',
-                content: new ArrayObject([
-                    'application/json' => new MediaType(
-                        examples: new ArrayObject([
-                            'field_errors' => $this->example(
-                                'Corps avec plusieurs violations de champ',
-                                CreateToolExample::VALIDATION_ERRORS,
-                            ),
-                            'unknown_fields' => $this->example(
-                                'Corps avec champs inconnus (strict JSON)',
-                                CreateToolExample::UNKNOWN_FIELDS,
-                            ),
-                        ]),
-                    ),
-                ]),
-            );
+            return $this->bodyValidationResponse([
+                'field_errors' => $this->example(
+                    'Corps avec plusieurs violations de champ',
+                    CreateToolExample::VALIDATION_ERRORS,
+                ),
+                'unknown_fields' => $this->example(
+                    'Corps avec champs inconnus (strict JSON)',
+                    CreateToolExample::UNKNOWN_FIELDS,
+                ),
+            ]);
+        }
+
+        if ($method === 'put' && $this->isItemPath($path)) {
+            return $this->bodyValidationResponse([
+                'id_not_integer' => $this->example(
+                    'ID de path invalide',
+                    ErrorResponseExample::ID_NOT_INTEGER,
+                ),
+                'field_errors' => $this->example(
+                    'Corps avec plusieurs violations de champ',
+                    UpdateToolExample::VALIDATION_ERRORS,
+                ),
+                'unknown_fields' => $this->example(
+                    'Corps avec champs inconnus (strict JSON)',
+                    CreateToolExample::UNKNOWN_FIELDS,
+                ),
+            ]);
         }
 
         $example = $this->isItemPath($path)
@@ -219,6 +254,21 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             description: 'Validation failed — one or several query parameters, path variables or body fields are invalid',
             content: new ArrayObject([
                 'application/json' => new MediaType(example: $example),
+            ]),
+        );
+    }
+
+    /**
+     * @param array<string, Example> $examples
+     */
+    private function bodyValidationResponse(array $examples): Response
+    {
+        return new Response(
+            description: 'Validation failed — body rejected (field constraints, unknown fields in strict JSON mode, or bad path variable)',
+            content: new ArrayObject([
+                'application/json' => new MediaType(
+                    examples: new ArrayObject($examples),
+                ),
             ]),
         );
     }

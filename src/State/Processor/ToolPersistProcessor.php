@@ -5,7 +5,7 @@ namespace App\State\Processor;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\State\ProcessorInterface;
 use App\Dto\Tool\Input\CreateToolInput;
-use App\Dto\Tool\Output\ToolCreatedOutput;
+use App\Dto\Tool\Output\ToolWriteOutput;
 use App\Entity\Tool;
 use App\Exception\Domain\InvalidToolStateException;
 use App\Mapper\ToolMapper;
@@ -13,7 +13,7 @@ use App\Repository\CategoryRepository;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * @implements ProcessorInterface<CreateToolInput, ToolCreatedOutput>
+ * @implements ProcessorInterface<CreateToolInput, ToolWriteOutput>
  */
 final readonly class ToolPersistProcessor implements ProcessorInterface
 {
@@ -24,7 +24,7 @@ final readonly class ToolPersistProcessor implements ProcessorInterface
     ) {
     }
 
-    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): ToolCreatedOutput
+    public function process(mixed $data, Operation $operation, array $uriVariables = [], array $context = []): ToolWriteOutput
     {
         $category = $this->categoryRepository->find($data->categoryId)
             ?? throw InvalidToolStateException::categoryRace($data->categoryId);
@@ -42,6 +42,6 @@ final readonly class ToolPersistProcessor implements ProcessorInterface
         $this->entityManager->persist($tool);
         $this->entityManager->flush();
 
-        return $this->mapper->toCreatedOutput($tool);
+        return $this->mapper->toWriteOutput($tool);
     }
 }

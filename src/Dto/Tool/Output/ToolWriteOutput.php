@@ -6,7 +6,7 @@ use App\Enum\Department;
 use App\Enum\ToolStatus;
 use DateTimeImmutable;
 
-final readonly class ToolCreatedOutput
+final readonly class ToolWriteOutput
 {
     public function __construct(
         public int $id,

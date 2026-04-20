@@ -21,6 +21,7 @@ use Symfony\Component\Serializer\Exception\NotEncodableValueException;
 use Symfony\Component\Serializer\Exception\PartialDenormalizationException;
 use Symfony\Component\Serializer\NameConverter\CamelCaseToSnakeCaseNameConverter;
 use Symfony\Component\Serializer\NameConverter\NameConverterInterface;
+use Symfony\Component\Validator\ConstraintViolationInterface;
 use Symfony\Component\Validator\ConstraintViolationListInterface;
 use Symfony\Component\Validator\Exception\ValidationFailedException;
 use Throwable;
@@ -157,7 +158,7 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
             $details = [];
             foreach ($exception->getErrors() as $error) {
                 $path = $error->getPath() ?? self::BODY_FIELD;
-                $details[$this->nameConverter->normalize($path)] = $error->getMessage();
+                $details[$this->nameConverter->normalize($path)] = ValidationMessage::INVALID_VALUE;
             }
             return $details;
         }
@@ -170,9 +171,23 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
         $details = [];
         foreach ($violations as $violation) {
             $propertyPath = $this->nameConverter->normalize($violation->getPropertyPath());
-            $details[$propertyPath] = (string) $violation->getMessage();
+            $details[$propertyPath] = $this->violationMessage($violation);
         }
 
         return ApiResponse::validationFailed($details);
+    }
+
+    /**
+     * Asserts violations have a non-null root (the DTO being validated) and keep their raw message.
+     * Denormalization errors converted by API Platform into violations have root=null and carry the
+     * raw Symfony type message that may leak internal class names — replaced by a generic message.
+     */
+    private function violationMessage(ConstraintViolationInterface $violation): string
+    {
+        if ($violation->getRoot() === null) {
+            return ValidationMessage::INVALID_VALUE;
+        }
+
+        return (string) $violation->getMessage();
     }
 }

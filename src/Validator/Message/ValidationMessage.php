@@ -19,4 +19,5 @@ final class ValidationMessage
     public const CATEGORY_NOT_FOUND = 'Category does not exist';
     public const UNKNOWN_FIELD = 'Unknown field';
     public const MALFORMED_JSON = 'Malformed JSON body';
+    public const INVALID_VALUE = 'Invalid value';
 }

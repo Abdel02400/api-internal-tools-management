@@ -307,13 +307,21 @@ Un `ApiExceptionSubscriber` intercepte toutes les exceptions levées sur les rou
 | **400** | `{ error: "Validation failed", details: { body: "Malformed JSON body" } }` | `NotEncodableValueException` (JSON invalide) |
 | **400** | `{ error: "Validation failed", details: { <field>: "Unknown field" } }` | `ExtraAttributesException` (strict JSON) |
 | **400** | `{ error: "Validation failed", details: { <field>: "This field is required" } }` | `MissingConstructorArgumentsException` |
-| **400** | `{ error: "Validation failed", details: { <field>: "..." } }` | `PartialDenormalizationException` (types/enums invalides, cumulés) |
+| **400** | `{ error: "Validation failed", details: { <field>: "Invalid value" } }` | `PartialDenormalizationException` (types/enums invalides, cumulés) — cf. note ci-dessous |
 | **500** | `{ error: "Internal server error", message: "Database connection failed" }` | `Doctrine\DBAL\Exception` — message standardisé |
 | **500** | `{ error: "Internal server error", message: "..." }` | Tout le reste — message brut en dev, **message générique en prod** via `%kernel.debug%` |
 
 Les JSON sont construits via une classe factory `App\Http\ApiResponse` (factory `build()` privée + méthodes publiques expressives `notFound()`, `validationFailed()`, `internalError()`).
 
 Le prefix API `/api` vient d'un paramètre Symfony `%api_prefix%` partagé entre `config/routes/api_platform.yaml` et le subscriber (via `#[Autowire]`) — une seule source de vérité.
+
+### Anti-leak sur les erreurs de dénormalisation
+
+Les messages générés par Symfony pour les erreurs de type/enum (`"This value should be of type App\Enum\ToolStatus"`, `"of type ToolStatus|null"`, etc.) **exposent des noms de classe internes** — mauvais pour une API publique. API Platform convertit ces `PartialDenormalizationException` en `ConstraintViolation` avec `root = null` (au lieu de l'objet cible pour une vraie violation Asserts).
+
+Le subscriber exploite cette distinction : quand `$violation->getRoot() === null`, la violation vient d'une erreur de dénormalisation → le message est remplacé par `ValidationMessage::INVALID_VALUE` ("Invalid value"). Les vraies violations Asserts applicatives (Length, Regex, Url, contraintes custom, etc.) ont `root === l'objet DTO` → leur message centralisé est préservé.
+
+→ Trade-off assumé : on perd la liste des valeurs valides pour un enum invalide (on ne dit pas "Must be one of: active, deprecated, trial"), mais on ne leak **aucun** nom de classe interne. Les valeurs valides restent documentées côté Swagger (via le schema de l'input DTO + les exemples).
 
 ### Messages et statuts (`src/Http/ApiMessage.php` + `App\Http\ApiResponse` constantes)
 
@@ -386,7 +394,7 @@ Pagination et tri ne sont **pas des filtres** — ils ne réduisent pas le jeu d
 │ 2. new Tool($name, $category, $cost, $dept) │ ← status & active_users_count = defaults entité
 │ 3. setDescription/setVendor/setWebsiteUrl   │
 │ 4. em->persist + em->flush                  │
-│ 5. ToolMapper->toCreatedOutput($tool)       │ → ToolCreatedOutput (12 champs du spec)
+│ 5. ToolMapper->toWriteOutput($tool)         │ → ToolWriteOutput (12 champs du spec)
 └─────────────────────────────────────────────┘
 ```
 
@@ -397,7 +405,7 @@ Pagination et tri ne sont **pas des filtres** — ils ne réduisent pas le jeu d
 | `name` | `NotBlank`, `Length(2-100)`, **`UniqueToolName`** (contrainte custom DB) |
 | `category_id` | `Positive`, **`ExistingCategory`** (contrainte custom DB) |
 | `monthly_cost` | `GreaterThanOrEqual(0)`, `Regex /^\d+(\.\d{1,2})?$/` (max 2 décimales) |
-| `owner_department` | Typé `Department` (enum — invalide → 400 via `PartialDenormalizationException`) |
+| `owner_department` | Typé `Department` (enum — invalide → 400 `"Invalid value"` via `PartialDenormalizationException`) |
 | `vendor` | `NotBlank`, `Length(max: 100)` |
 | `description` | Optional, pas de contrainte (colonne `TEXT` libre) |
 | `website_url` | Optional, `Url`, `Length(max: 255)` |
@@ -430,11 +438,11 @@ Cas couverts par `ApiExceptionSubscriber::extractDeserializationDetails()` :
 | `NotEncodableValueException` | 400 | `{body: "Malformed JSON body"}` |
 | `ExtraAttributesException` | 400 | `{<field>: "Unknown field"}` |
 | `MissingConstructorArgumentsException` | 400 | `{<field>: "This field is required"}` |
-| `PartialDenormalizationException` | 400 | `{<field>: "...type error..."}` (agrège les erreurs de types invalides, enums non-matchés, etc.) |
+| `PartialDenormalizationException` | 400 | `{<field>: "Invalid value"}` (cumulé pour tous les champs au type/enum invalide — message générique pour ne pas leaker les noms de classe internes, cf. section "Anti-leak" plus haut) |
 
 ### Shape de la réponse 201
 
-Nouveau DTO dédié `ToolCreatedOutput` qui colle exactement au spec (12 champs) — ni `total_monthly_cost` ni `usage_metrics` (qui seraient triviaux à 0 juste après création). Pas de réutilisation de `ToolDetailOutput` pour ne pas renvoyer de champs absents du contrat.
+DTO dédié `ToolWriteOutput` (partagé avec PUT) qui colle exactement au spec (12 champs) — ni `total_monthly_cost` ni `usage_metrics` (qui seraient triviaux à 0 juste après création). Pas de réutilisation de `ToolDetailOutput` pour ne pas renvoyer de champs absents du contrat.
 
 ```json
 {
@@ -448,6 +456,68 @@ Nouveau DTO dédié `ToolCreatedOutput` qui colle exactement au spec (12 champs)
 
 Le `status` par défaut (`active`) vient du default property de l'entité (`Tool::$status = ToolStatus::Active`), pas du processor — cohérent avec le pattern "entity owns its invariants".
 
+## `PUT /api/tools/{id}` — mise à jour partielle
+
+### Flux
+
+```
+┌─────────────────────────────────────────────┐
+│ Route AP (read: false)                      │ ← important : AP ne fait PAS de read automatique
+│ Serializer (strict JSON, collect errors)    │   → UpdateToolInput (tous champs optional)
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ ValidatorInterface (auto AP)                │ ← Asserts sur les champs fournis uniquement
+│                                             │   (Symfony skip les Asserts sur `null`)
+└─────────────────────────────────────────────┘
+              ↓
+┌─────────────────────────────────────────────┐
+│ ToolUpdateProcessor                         │
+├─────────────────────────────────────────────┤
+│ 1. ToolIdFactory->create($uriVariables)     │ ← 400 si id non-entier
+│ 2. ToolRepository->find(id)                 │ ← 404 ToolNotFoundException si null
+│ 3. assertNameAvailable($data, $tool)        │ ← check unicité si name change, exclu self
+│ 4. applyChanges($data, $tool)               │ ← setters sur les champs non-null uniquement
+│ 5. em->flush() (pas de persist — déjà géré) │ ← déclenche PreUpdate → updated_at auto
+│ 6. ToolMapper->toWriteOutput($tool)         │
+└─────────────────────────────────────────────┘
+```
+
+### Pourquoi `read: false` ?
+
+Par défaut AP déclenche un "read" (via un provider par défaut) avant l'étape write, pour fournir l'entité existante au processor. Avec `input: UpdateToolInput::class`, ce read n'a pas de sens — le processor reçoit un DTO neuf, pas l'entité. Sans `read: false`, le pipeline coinçait en 404 au niveau du routage. On désactive et on load la Tool nous-mêmes dans le processor (via `ToolIdFactory` + `ToolRepository`, cohérent avec `ToolItemProvider`).
+
+### Unicité du `name` — exclusion de soi-même
+
+Le `UniqueToolName` utilisé sur `CreateToolInput` ne convient pas pour PUT : si le client envoie `name: "Confluence"` sur tool 5 (dont le nom actuel EST "Confluence"), le validator rejetterait à tort. Solution : check dédié dans le processor (`assertNameAvailable`) après avoir chargé l'outil courant — si le nom change **ET** qu'un autre tool porte déjà ce nom, throw `ValidationFailedException` via `ViolationFactory::nameAlreadyExists()`. Passe par le flow 400 unifié (même shape que les autres violations).
+
+### `UpdateToolInput` vs `CreateToolInput`
+
+| | `CreateToolInput` | `UpdateToolInput` |
+|---|---|---|
+| Champs | 5 obligatoires + 2 optionnels | **Tous optionnels** (valeurs par défaut = `null`) |
+| NotBlank | oui | non — on tolère l'absence |
+| `UniqueToolName` | sur `name` | non (check processor pour exclure self) |
+| Asserts (Length, Url, Regex, etc.) | appliqués systématiquement | **appliqués uniquement si valeur fournie** (Symfony skip sur null) |
+
+### Sémantique "champ non fourni"
+
+Si un champ est **absent** du JSON ou envoyé à `null`, il reste **inchangé**. Le DTO ne distingue pas les deux cas (sur `?string $description = null`, les deux arrivent comme `null` côté PHP).
+
+**Limitation actuelle** : le client ne peut pas **unset** explicitement un champ nullable (`description`, `vendor`, `website_url`) via PUT. S'il envoie `"description": null`, on interprète ça comme "ne touche pas". Pour unset, il faudrait soit :
+- Accéder au raw JSON pour détecter `array_key_exists` vs valeur à null
+- Introduire un wrapper avec un état "présent avec valeur null"
+
+Non implémenté car pas demandé par le spec. **Feature à envisager si un besoin métier apparaît** (ex: vider une description suite à retrait d'un contrat).
+
+### Réutilisation de `ToolWriteOutput`
+
+Même DTO que pour POST (shape identique, 12 champs). Ancien nom `ToolCreatedOutput` renommé en `ToolWriteOutput` pour refléter l'usage partagé (POST et PUT). Le mapper expose `toWriteOutput()` en lieu et place de `toCreatedOutput()`.
+
+### `updated_at` auto
+
+Géré par le lifecycle callback `#[ORM\PreUpdate]` de l'entité `Tool` — il se déclenche automatiquement sur `em->flush()` dès qu'un champ change. Si le PUT n'applique **aucun** changement effectif (body vide, ou valeurs identiques), PreUpdate ne fire pas → `updated_at` reste identique. Comportement Doctrine standard, acceptable.
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -460,6 +530,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `ToolCollectionExample` — 6 cas de réponse pour `GET /api/tools`
 - `ToolDetailExample` — 2 exemples `GET /api/tools/{id}` (détail complet + outil peu utilisé)
 - `CreateToolExample` — body d'entrée, 201, 400 (field errors + unknown fields)
+- `UpdateToolExample` — body partiel, 200, 400 (field errors + id invalide + unknown fields)
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -479,8 +550,8 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │   ├── QueryParameter/           # Classes QueryParameter réutilisables (Enum, PositiveNumber, PositiveInteger, String)
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/Tool/
-│   │   ├── Input/                    # DTOs body POST/PUT (CreateToolInput — Asserts + contraintes custom DB)
-│   │   ├── Output/                   # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolCreatedOutput, Usage*)
+│   │   ├── Input/                    # DTOs body POST/PUT (CreateToolInput, UpdateToolInput — Asserts + contraintes custom DB)
+│   │   ├── Output/                   # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
 │   │   └── Query/                    # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
 │   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder)
@@ -498,7 +569,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │   └── OpenApiFactory.php        # Decorator enrichissant Swagger (exemples 200 + réponses 400/404/500)
 │   ├── Repository/                   # ToolRepository (ORM), UsageLogRepository (DBAL natif pour `usage_logs` non mappée)
 │   ├── State/
-│   │   ├── Processor/                # ToolPersistProcessor (POST create)
+│   │   ├── Processor/                # ToolPersistProcessor (POST), ToolUpdateProcessor (PUT)
 │   │   └── Provider/                 # ToolCollectionProvider, ToolItemProvider
 │   ├── Validator/
 │   │   ├── Constraint/               # Contraintes custom (UniqueToolName, ExistingCategory) + validators

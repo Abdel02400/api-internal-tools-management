@@ -21,6 +21,11 @@ final class ViolationFactory
         return self::build($field, $value, ValidationMessage::MUST_BE_INTEGER);
     }
 
+    public static function nameAlreadyExists(string $field, mixed $value): ConstraintViolation
+    {
+        return self::build($field, $value, ValidationMessage::NAME_ALREADY_EXISTS);
+    }
+
     private static function build(string $field, mixed $value, string $message): ConstraintViolation
     {
         return new ConstraintViolation(
