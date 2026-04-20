@@ -25,4 +25,26 @@ final class ToolDetailExample
             ],
         ],
     ];
+
+    public const LOW_USAGE = [
+        'id' => 12,
+        'name' => 'Asana',
+        'description' => 'Project and task management',
+        'vendor' => 'Asana Inc.',
+        'category' => 'Productivity',
+        'monthly_cost' => 10.99,
+        'owner_department' => 'Operations',
+        'status' => 'trial',
+        'website_url' => 'https://asana.com',
+        'active_users_count' => 2,
+        'total_monthly_cost' => 21.98,
+        'created_at' => '2025-05-01T09:00:00+00:00',
+        'updated_at' => '2025-05-01T09:00:00+00:00',
+        'usage_metrics' => [
+            'last_30_days' => [
+                'total_sessions' => 0,
+                'avg_session_minutes' => 0,
+            ],
+        ],
+    ];
 }

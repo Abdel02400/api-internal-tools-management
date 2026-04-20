@@ -211,6 +211,66 @@ Les deux exceptions portent un message centralisé, attrapé par la factory pour
 
 Toute violation d'invariant (ex: entité non persistée) déclenche `InvalidToolStateException`.
 
+## `GET /api/tools/{id}` — détail + usage_metrics
+
+### Flux
+
+```
+┌─────────────────────────────────────────────┐
+│ ToolItemProvider                            │
+├─────────────────────────────────────────────┤
+│ 1. ToolIdFactory->create($uriVariables)     │ ← 400 "Must be an integer" si format invalide
+│ 2. ToolRepository->find(id)                 │ ← 404 ToolNotFoundException si null
+│ 3. UsageLogRepository->getLast30DaysMetrics │ ← SQL natif sur `usage_logs` (table non mappée)
+│ 4. ToolMapper->toDetailOutput(tool, metrics)│
+└─────────────────────────────────────────────┘
+```
+
+Note : pas de `requirements` sur la route `{id}` — on laisse l'ID atteindre le provider pour renvoyer un **400 explicite** sur format invalide plutôt qu'un 404 générique "Resource not found" au niveau du routeur.
+
+### `ToolIdFactory` (`src/Factory/Tool/`)
+
+Extrait et valide l'ID depuis `$uriVariables` (`filter_var` + `FILTER_VALIDATE_INT`), retourne un `int` ou throw `ValidationFailedException` (via `ViolationFactory::integer()`, même pattern que `ListToolsQueryFactory` pour cumuler les violations dans la même `ConstraintViolationList`).
+
+Pas de DTO `GetToolQuery` : pour un simple `int` ce serait du ceremonial vide. Dès qu'un endpoint aura plus d'un param de path/query à valider, ce serait le moment de créer une DTO dédiée.
+
+### `UsageLogRepository` (`src/Repository/`)
+
+Service **DBAL natif** (pas `ServiceEntityRepository`) car la table `usage_logs` est volontairement **non mappée** côté Doctrine (voir le `schema_filter`). Injection directe de `Doctrine\DBAL\Connection`.
+
+Méthode `getLast30DaysMetrics(int $toolId): UsageMetricsOutput` :
+- SQL agrégé : `COUNT(*) as total_sessions, COALESCE(AVG(usage_minutes), 0) as avg_minutes`
+- Fenêtre : `session_date >= (today - 30 days)` — date calculée côté PHP pour rester portable (pas de `INTERVAL` MySQL-specific)
+- Troncature via cast `(int)` sur la moyenne
+- Constante `LAST_N_DAYS = 30` — évite le magic number
+
+**Note sur les seed data** : le fichier `docker/mysql/init.sql` contient des `usage_logs` datés de mai-juillet 2025 (fixes). Aujourd'hui étant au-delà de cette fenêtre, l'API renvoie systématiquement `total_sessions: 0, avg_session_minutes: 0` sur la fenêtre 30j. Ce n'est pas un bug — la SQL est validée manuellement avec une fenêtre élargie. En prod avec des données récentes, les valeurs remonteraient naturellement.
+
+### DTOs imbriquées : `UsageMetricsOutput` + `UsageWindowOutput`
+
+La shape JSON attendue est :
+```json
+"usage_metrics": {
+    "last_30_days": {
+        "total_sessions": 127,
+        "avg_session_minutes": 45
+    }
+}
+```
+
+Deux niveaux → **deux DTOs distincts** (pas un seul DTO plat) :
+
+- **`UsageMetricsOutput`** — conteneur des fenêtres. Porte `#[SerializedName('last_30_days')]` car le NameConverter camelCase→snake_case produirait `last30_days` (pas `last_30_days`) sur une propriété `$last30Days`.
+- **`UsageWindowOutput`** — bucket atomique (`totalSessions`, `avgSessionMinutes`). Nom générique pour être réutilisable : ajouter `last_7_days` ou `last_90_days` demain ne demandera qu'une propriété de plus sur `UsageMetricsOutput`, le bucket reste identique.
+
+### Validation ID
+
+`filter_var($rawId, FILTER_VALIDATE_INT)` :
+- `'abc'`, `'5.5'`, `null` → `false` → 400 `{id: "Must be an integer"}`
+- `'5'`, `'0'`, `'-5'` → entier → `find()` → 200 ou 404 selon l'existence
+
+Les entiers négatifs/zéro ne sont **pas** bloqués côté format (valides au regard de `FILTER_VALIDATE_INT`) — ils donnent simplement un 404 via `find()` puisqu'aucun tool n'existe à ces IDs.
+
 ## Validation
 
 Architecture à **3 couches** qui convergent toutes vers `ValidationFailedException` → 400 unifié :
@@ -329,7 +389,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │   └── Tool/ToolResource.php     # Config AP pour Tool (attribut #[ApiResource])
 │   ├── Dto/Tool/
 │   │   ├── Input/                    # DTOs POST/PUT (à venir)
-│   │   ├── Output/                   # DTOs GET responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ...)
+│   │   ├── Output/                   # DTOs GET responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, UsageMetricsOutput, UsageWindowOutput)
 │   │   └── Query/                    # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
 │   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder)
@@ -337,7 +397,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   ├── Exception/
 │   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
 │   │   └── Http/                     # Exceptions mappées à des codes HTTP (ToolNotFoundException)
-│   ├── Factory/Tool/                 # ListToolsQueryFactory — Request → DTO + collecte de violations
+│   ├── Factory/Tool/                 # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
 │   ├── Http/
 │   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
 │   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)
@@ -345,7 +405,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   ├── OpenApi/
 │   │   ├── Example/                  # Constantes d'exemples JSON (ErrorResponse, ToolCollection, ToolDetail)
 │   │   └── OpenApiFactory.php        # Decorator enrichissant Swagger (exemples 200 + réponses 400/404/500)
-│   ├── Repository/                   # Repositories Doctrine (ToolRepository::search + countAll + countMatching)
+│   ├── Repository/                   # ToolRepository (ORM), UsageLogRepository (DBAL natif pour `usage_logs` non mappée)
 │   ├── State/Provider/               # ToolCollectionProvider, ToolItemProvider
 │   ├── Validator/
 │   │   ├── Message/ValidationMessage.php  # Messages d'erreur génériques

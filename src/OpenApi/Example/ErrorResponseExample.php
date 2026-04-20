@@ -12,6 +12,13 @@ final class ErrorResponseExample
         ],
     ];
 
+    public const ID_NOT_INTEGER = [
+        'error' => 'Validation failed',
+        'details' => [
+            'id' => 'Must be an integer',
+        ],
+    ];
+
     public const TOOL_NOT_FOUND = [
         'error' => 'Tool not found',
         'message' => 'Tool with ID 999 does not exist',

@@ -74,7 +74,7 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         }
 
         if (!isset($responses['400'])) {
-            $responses['400'] = $this->validationErrorResponse();
+            $responses['400'] = $this->validationErrorResponse($path);
         }
 
         if ($this->supportsNotFound($path, $method) && !isset($responses['404'])) {
@@ -144,6 +144,10 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
                     'GET /api/tools/5 — détail complet',
                     ToolDetailExample::FOUND,
                 ),
+                'low_usage' => $this->example(
+                    'GET /api/tools/12 — outil peu utilisé (0 session sur 30j)',
+                    ToolDetailExample::LOW_USAGE,
+                ),
             ];
         }
 
@@ -161,14 +165,16 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
         );
     }
 
-    private function validationErrorResponse(): Response
+    private function validationErrorResponse(string $path): Response
     {
+        $example = $this->isItemPath($path)
+            ? ErrorResponseExample::ID_NOT_INTEGER
+            : ErrorResponseExample::VALIDATION_FAILED;
+
         return new Response(
-            description: 'Validation failed — one or several query parameters or body fields are invalid',
+            description: 'Validation failed — one or several query parameters, path variables or body fields are invalid',
             content: new ArrayObject([
-                'application/json' => new MediaType(
-                    example: ErrorResponseExample::VALIDATION_FAILED,
-                ),
+                'application/json' => new MediaType(example: $example),
             ]),
         );
     }

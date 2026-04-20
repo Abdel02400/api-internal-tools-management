@@ -19,7 +19,6 @@ use App\Enum\SortOrder;
 use App\Enum\ToolStatus;
 use App\State\Provider\ToolCollectionProvider;
 use App\State\Provider\ToolItemProvider;
-use Symfony\Component\Routing\Requirement\Requirement;
 use Symfony\Component\Serializer\Encoder\JsonEncoder;
 
 #[ApiResource(
@@ -46,7 +45,6 @@ use Symfony\Component\Serializer\Encoder\JsonEncoder;
         ),
         new Get(
             uriTemplate: self::URI_ITEM,
-            requirements: [self::ID_PARAM => Requirement::POSITIVE_INT],
             provider: ToolItemProvider::class,
             output: ToolDetailOutput::class,
         ),
