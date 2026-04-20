@@ -10,6 +10,7 @@ final class ApiResponse
     public const ERROR_RESOURCE_NOT_FOUND = 'Resource not found';
     public const ERROR_INTERNAL = 'Internal server error';
     public const ERROR_VALIDATION_FAILED = 'Validation failed';
+    public const ERROR_INVALID_ANALYTICS_PARAMETER = 'Invalid analytics parameter';
 
     public const MESSAGE_RESOURCE_NOT_FOUND = 'The requested resource could not be found';
     public const MESSAGE_INTERNAL_ERROR = 'Internal server error occurred';
@@ -38,6 +39,14 @@ final class ApiResponse
     public static function validationFailed(array $details): JsonResponse
     {
         return self::build(Response::HTTP_BAD_REQUEST, self::ERROR_VALIDATION_FAILED, details: $details);
+    }
+
+    /**
+     * @param array<string, string> $details
+     */
+    public static function invalidAnalyticsParameter(array $details): JsonResponse
+    {
+        return self::build(Response::HTTP_BAD_REQUEST, self::ERROR_INVALID_ANALYTICS_PARAMETER, details: $details);
     }
 
     public static function internalError(string $message): JsonResponse

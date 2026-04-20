@@ -39,9 +39,9 @@ final class DepartmentCostExample
     ];
 
     public const VALIDATION_ERROR = [
-        'error' => 'Validation failed',
+        'error' => 'Invalid analytics parameter',
         'details' => [
-            'sort_by' => 'The value you selected is not a valid choice.',
+            'sort_by' => 'Invalid value',
         ],
     ];
 }

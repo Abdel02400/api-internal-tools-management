@@ -315,6 +315,36 @@ Les JSON sont construits via une classe factory `App\Http\ApiResponse` (factory 
 
 Le prefix API `/api` vient d'un paramètre Symfony `%api_prefix%` partagé entre `config/routes/api_platform.yaml` et le subscriber (via `#[Autowire]`) — une seule source de vérité.
 
+### Format d'erreur spécifique aux endpoints Analytics (Part 2 spec)
+
+Le spec Part 2 §3.2 impose un **format d'erreur distinct** pour les endpoints `/api/analytics/*` :
+
+```json
+{
+  "error": "Invalid analytics parameter",
+  "details": {
+    "limit": "Must be positive integer between 1 and 100"
+  }
+}
+```
+
+Deux divergences vs le format tools :
+- **`error`** : `"Invalid analytics parameter"` au lieu de `"Validation failed"`
+- **Messages** normalisés par nom de paramètre, indépendants des messages techniques d'AP/Symfony (pour coller au texte exact du spec et éviter tout leak)
+
+Le switch est purement **route-based** dans `ApiExceptionSubscriber::isAnalyticsPath()` (préfixe `%api_prefix%/analytics`). Aucune configuration par endpoint — les 5 endpoints analytics héritent automatiquement du format.
+
+Mapping des messages (`ApiExceptionSubscriber::analyticsMessage()`) :
+
+| Nom de param | Message renvoyé |
+|---|---|
+| `limit` | `"Must be positive integer between 1 and 100"` |
+| `min_cost`, `max_cost` | `"Must be a positive number"` |
+| `max_users` | `"Must be a positive integer"` |
+| autre (ex: `sort_by`, `order`) | `"Invalid value"` (fallback générique) |
+
+Les constantes vivent dans `ValidationMessage` (préfixe `ANALYTICS_*`). La méthode `ApiResponse::invalidAnalyticsParameter(array $details)` construit la JSON response.
+
 ### Anti-leak sur les erreurs de dénormalisation
 
 Les messages générés par Symfony pour les erreurs de type/enum (`"This value should be of type App\Enum\ToolStatus"`, `"of type ToolStatus|null"`, etc.) **exposent des noms de classe internes** — mauvais pour une API publique. API Platform convertit ces `PartialDenormalizationException` en `ConstraintViolation` avec `root = null` (au lieu de l'objet cible pour une vraie violation Asserts).
@@ -605,6 +635,89 @@ Réutilisables pour les 4 endpoints analytics à venir (`expensive-tools`, `tool
 - **`OpenApiFactory`** — nouveau branche `isDepartmentCostsPath()` avec 2 exemples 200 (`with_data` + `empty_db`)
 - **`ApiMessage::NO_ANALYTICS_DATA`** — constante dédiée pour le message "empty DB"
 
+## Analytics — `GET /api/analytics/expensive-tools`
+
+Top outils coûteux avec rating d'efficacité basé sur le ratio `cost_per_user` vs moyenne compagnie. Règle globale : `status = 'active'` uniquement.
+
+### Query params
+
+| Param | Type | Défaut | Contrainte |
+|---|---|---|---|
+| `limit` | int | `10` | 1 ≤ limit ≤ 100 |
+| `min_cost` | float | — | ≥ 0 |
+
+### Flux
+
+```
+┌──────────────────────────────────────────────────────┐
+│ ExpensiveToolsQueryFactory->create()                 │ ← parse limit/min_cost, cumule violations
+└──────────────────────────────────────────────────────┘
+              ↓
+┌──────────────────────────────────────────────────────┐
+│ ExpensiveToolCollectionProvider                      │
+├──────────────────────────────────────────────────────┤
+│ 1. ValidatorInterface->validate($query)              │
+│ 2. repository->findAllFiltered($query)               │ ← tous les outils filtrés (pas limité)
+│ 3. repository->computeCompanyAverageCostPerUser()    │ ← SUM(cost)/SUM(users) sur actifs users>0
+│ 4. ExpensiveToolMapper->toCollection($rows, $avg, $q)│ ← classifie + limite + agrège savings
+└──────────────────────────────────────────────────────┘
+```
+
+### Pourquoi "fetch all filtered" puis limiter en PHP ?
+
+`potential_savings_identified` = somme des coûts des outils `efficiency_rating = "low"` sur **toute** la pool filtrée (pas juste le top N affiché). Si on limitait en SQL, on ne pourrait pas calculer cette somme correctement (on n'aurait pas accès aux outils low hors des top N).
+
+Approche : le repository ramène TOUS les outils filtrés triés desc, le mapper calcule les ratings sur tous, somme les "low" pour `potential_savings`, puis slice le top N pour `data`. Pour la taille du dataset (quelques dizaines d'outils), le coût du fetch-all est négligeable.
+
+### Règles métier (clarifications spec)
+
+#### `cost_per_user`
+
+- Formule : `monthly_cost / active_users_count`
+- Outils à **0 user** : `cost_per_user = null`. Via `skip_null_values` global (cohérent avec le reste de l'API), le champ est **omis** du JSON. Le client déduit "non calculable" de `active_users_count: 0`.
+
+#### `avg_cost_per_user_company`
+
+- Formule : `SUM(monthly_cost) / SUM(active_users_count)` sur **tous** les outils actifs
+- **Outils à 0 users exclus du calcul** (ils fausseraient le dénominateur)
+- C'est une **baseline globale fixe** : indépendante du filtre `min_cost`. Les ratings sont toujours comparés à cette moyenne compagnie, pas à une moyenne du sous-ensemble filtré.
+- Cas limite : si AUCUN outil actif n'a de users, `avg = 0` (graceful fallback).
+
+#### `efficiency_rating` (enum `EfficiencyRating`)
+
+Basé sur le ratio `cost_per_user / avg_cost_per_user_company` :
+
+| Ratio | Rating |
+|---|---|
+| < 0.5 | `excellent` |
+| 0.5 ≤ ratio < 0.8 | `good` |
+| 0.8 ≤ ratio ≤ 1.2 | `average` |
+| > 1.2 | `low` |
+| `cost_per_user = null` (0 users) | `low` **forcé** |
+
+Centralisé dans `src/Helper/EfficiencyClassifier::classify()`. Réutilisable pour d'autres endpoints analytics.
+
+#### `potential_savings_identified`
+
+- Somme des `monthly_cost` des outils avec `efficiency_rating = "low"` dans la pool filtrée
+- Sur 0 outils "low" → `0`
+- Arrondi 2 décimales
+
+#### `total_tools_analyzed`
+
+- Count des outils qui matchent le filtre (status=active + min_cost si fourni)
+- **Indépendant de `limit`** — représente la taille de la pool analysée, pas ce qui est retourné
+
+### Shape contextuelle
+
+| Scénario | Shape |
+|---|---|
+| Données présentes | `{ data: [...], analysis: {...} }` |
+| Filtre `min_cost` sans résultat | `{ data: [], analysis: { total_tools_analyzed: 0, avg_cost_per_user_company, potential_savings_identified: 0 }, message: "No tools match the applied filters" }` |
+| Aucun outil actif en DB | `{ data: [], analysis: { total_tools_analyzed: 0, avg_cost_per_user_company: 0, potential_savings_identified: 0 }, message: "No analytics data available - ..." }` |
+
+Les 2 messages distincts (réutilisés depuis `ApiMessage`) permettent au client de différencier "filtre trop restrictif" (résultat normal) vs "aucune donnée dispo" (problème source).
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -619,6 +732,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `CreateToolExample` — body d'entrée, 201, 400 (field errors + unknown fields)
 - `UpdateToolExample` — body partiel, 200, 400 (field errors + id invalide + unknown fields)
 - `Analytics\DepartmentCostExample` — GET analytics department-costs, 200 (données présentes + empty DB)
+- `Analytics\ExpensiveToolExample` — GET analytics expensive-tools, 200 (with_data + no_match + empty_db) + 400
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -645,7 +759,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │       ├── Output/               # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
 │   │       └── Query/                # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
-│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy, EfficiencyRating)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
 │   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
@@ -653,7 +767,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   ├── Factory/
 │   │   ├── Analytics/                # Factories query params pour analytics (DepartmentCostsQueryFactory, ...)
 │   │   └── Tool/                     # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
-│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast — utilisés par la couche Analytics)
+│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast, EfficiencyClassifier — utilisés par la couche Analytics)
 │   ├── Http/
 │   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
 │   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)

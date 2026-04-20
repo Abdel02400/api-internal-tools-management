@@ -11,8 +11,10 @@ use ApiPlatform\OpenApi\Model\RequestBody;
 use ApiPlatform\OpenApi\Model\Response;
 use ApiPlatform\OpenApi\OpenApi;
 use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
+use App\ApiResource\Analytics\ExpensiveToolAnalyticsResource;
 use App\ApiResource\Tool\ToolResource;
 use App\OpenApi\Example\Analytics\DepartmentCostExample;
+use App\OpenApi\Example\Analytics\ExpensiveToolExample;
 use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
@@ -215,12 +217,34 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'get' && $this->isExpensiveToolsPath($path)) {
+            return [
+                'with_data' => $this->example(
+                    'GET /api/analytics/expensive-tools?limit=10 — top outils coûteux',
+                    ExpensiveToolExample::DATA,
+                ),
+                'no_match' => $this->example(
+                    'GET /api/analytics/expensive-tools?min_cost=99999 — filtre sans résultat',
+                    ExpensiveToolExample::NO_MATCH,
+                ),
+                'empty_db' => $this->example(
+                    'GET /api/analytics/expensive-tools — aucun outil actif en DB',
+                    ExpensiveToolExample::EMPTY_DB,
+                ),
+            ];
+        }
+
         return null;
     }
 
     private function isDepartmentCostsPath(string $path): bool
     {
         return rtrim($path, '/') === $this->apiPrefix . DepartmentCostAnalyticsResource::URI;
+    }
+
+    private function isExpensiveToolsPath(string $path): bool
+    {
+        return rtrim($path, '/') === $this->apiPrefix . ExpensiveToolAnalyticsResource::URI;
     }
 
     /**
@@ -268,6 +292,7 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
 
         $example = match (true) {
             $this->isDepartmentCostsPath($path) => DepartmentCostExample::VALIDATION_ERROR,
+            $this->isExpensiveToolsPath($path) => ExpensiveToolExample::VALIDATION_ERROR,
             $this->isItemPath($path) => ErrorResponseExample::ID_NOT_INTEGER,
             default => ErrorResponseExample::VALIDATION_FAILED,
         };

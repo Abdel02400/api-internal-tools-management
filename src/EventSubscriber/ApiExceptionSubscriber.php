@@ -67,11 +67,12 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
 
     public function onKernelException(ExceptionEvent $event): void
     {
-        if (!$this->handles($event->getRequest())) {
+        $request = $event->getRequest();
+        if (!$this->handles($request)) {
             return;
         }
 
-        $event->setResponse($this->buildResponse($event->getThrowable()));
+        $event->setResponse($this->buildResponse($event->getThrowable(), $this->isAnalyticsPath($request)));
     }
 
     private function handles(Request $request): bool
@@ -87,16 +88,23 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
         return false;
     }
 
-    private function buildResponse(Throwable $exception): JsonResponse
+    private function isAnalyticsPath(Request $request): bool
+    {
+        return str_starts_with($request->getPathInfo(), $this->apiPrefix . self::ANALYTICS_PREFIX);
+    }
+
+    private function buildResponse(Throwable $exception, bool $analytics): JsonResponse
     {
         $violations = $this->extractViolations($exception);
         if ($violations !== null) {
-            return $this->validationResponse($violations);
+            return $this->validationResponse($violations, $analytics);
         }
 
         $deserializationDetails = $this->extractDeserializationDetails($exception);
         if ($deserializationDetails !== null) {
-            return ApiResponse::validationFailed($deserializationDetails);
+            return $analytics
+                ? ApiResponse::invalidAnalyticsParameter($deserializationDetails)
+                : ApiResponse::validationFailed($deserializationDetails);
         }
 
         if ($exception instanceof ToolNotFoundException) {
@@ -169,15 +177,34 @@ final class ApiExceptionSubscriber implements EventSubscriberInterface
         return null;
     }
 
-    private function validationResponse(ConstraintViolationListInterface $violations): JsonResponse
+    private function validationResponse(ConstraintViolationListInterface $violations, bool $analytics): JsonResponse
     {
         $details = [];
         foreach ($violations as $violation) {
             $propertyPath = $this->nameConverter->normalize($violation->getPropertyPath());
-            $details[$propertyPath] = $this->violationMessage($violation);
+            $details[$propertyPath] = $analytics
+                ? $this->analyticsMessage($propertyPath)
+                : $this->violationMessage($violation);
         }
 
-        return ApiResponse::validationFailed($details);
+        return $analytics
+            ? ApiResponse::invalidAnalyticsParameter($details)
+            : ApiResponse::validationFailed($details);
+    }
+
+    /**
+     * Messages normalisés par nom de paramètre pour les endpoints Analytics (spec Part 2).
+     * Les messages d'origine (AP schema ou Asserts) sont remplacés pour coller au format du spec
+     * et éviter de leaker des détails d'implémentation.
+     */
+    private function analyticsMessage(string $field): string
+    {
+        return match ($field) {
+            'limit' => ValidationMessage::ANALYTICS_LIMIT,
+            'min_cost', 'max_cost' => ValidationMessage::ANALYTICS_POSITIVE_NUMBER,
+            'max_users' => ValidationMessage::ANALYTICS_POSITIVE_INTEGER,
+            default => ValidationMessage::INVALID_VALUE,
+        };
     }
 
     /**

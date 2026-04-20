@@ -32,7 +32,10 @@ final class ViolationFactory
             message: $message,
             messageTemplate: null,
             parameters: [],
-            root: null,
+            // root != null pour éviter que `ApiExceptionSubscriber::violationMessage` ne
+            // remplace le message par "Invalid value" (ce filtre vise uniquement les
+            // violations issues de PartialDenormalizationException d'AP, qui ont root=null).
+            root: $value ?? $field,
             propertyPath: $field,
             invalidValue: $value,
         );

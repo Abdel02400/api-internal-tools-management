@@ -20,4 +20,9 @@ final class ValidationMessage
     public const UNKNOWN_FIELD = 'Unknown field';
     public const MALFORMED_JSON = 'Malformed JSON body';
     public const INVALID_VALUE = 'Invalid value';
+
+    // Messages spécifiques aux endpoints Analytics (Part 2 spec — "Invalid analytics parameter")
+    public const ANALYTICS_LIMIT = 'Must be positive integer between 1 and 100';
+    public const ANALYTICS_POSITIVE_NUMBER = 'Must be a positive number';
+    public const ANALYTICS_POSITIVE_INTEGER = 'Must be a positive integer';
 }
