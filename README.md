@@ -855,6 +855,70 @@ Count des outils retournés (le filtre `max_users` est appliqué en SQL → tous
 | Données présentes | `{ data: [...], savings_analysis: { total, monthly, annual } }` |
 | Aucun outil actif | `{ data: [], savings_analysis: { 0, 0, 0 }, message: "No analytics data..." }` |
 
+## Analytics — `GET /api/analytics/vendor-summary`
+
+Analyse par fournisseur : consolide les coûts, users, départements et efficience par vendor. Use case : identifier les vendors coûteux à négocier, les mono-outils à consolider, et les plus efficients à privilégier.
+
+### SQL
+
+```sql
+SELECT
+    t.vendor AS vendor,
+    COUNT(t.id) AS tools_count,
+    SUM(t.monthly_cost) AS total_monthly_cost,
+    SUM(t.active_users_count) AS total_users,
+    GROUP_CONCAT(DISTINCT t.owner_department ORDER BY t.owner_department ASC SEPARATOR ',') AS departments,
+    CASE WHEN SUM(t.active_users_count) > 0
+         THEN SUM(t.monthly_cost) / SUM(t.active_users_count)
+         ELSE NULL END AS average_cost_per_user
+FROM tools t
+WHERE t.status = 'active' AND t.vendor IS NOT NULL
+GROUP BY t.vendor
+ORDER BY total_monthly_cost DESC
+```
+
+Points notables :
+- **`GROUP_CONCAT(DISTINCT ... ORDER BY ... ASC SEPARATOR ',')`** : concat des départements uniques, tri alphabétique, séparés par virgule — exactement ce que demande le spec. `DISTINCT` dédoublonne, `ORDER BY` garantit la déterminisme.
+- **`t.vendor IS NOT NULL`** : défensif (le spec dit vendor obligatoire pour les POST, mais la colonne DB est nullable — des données legacy peuvent exister).
+- **`CASE WHEN`** sur `average_cost_per_user` : évite la division par zéro au niveau SQL si tous les outils du vendor ont 0 users.
+
+### Règles métier (clarifications spec)
+
+#### `vendor_efficiency` (enum `VendorEfficiency`)
+
+Seuils **absolus** en € par user (différents de `EfficiencyClassifier` qui travaille en ratio vs moyenne) :
+
+| `average_cost_per_user` | Efficiency |
+|---|---|
+| < 5€ | `excellent` |
+| 5-15€ | `good` |
+| 15-25€ | `average` |
+| > 25€ | `poor` |
+| non calculable (0 user total) | `poor` **forcé** |
+
+Labels distincts du EfficiencyClassifier (`excellent/good/average/**poor**` vs `excellent/good/average/**low**`) — je garde la terminologie exacte du spec pour chaque endpoint.
+
+#### `single_tool_vendors`
+
+Count des vendors qui ont **exactement 1** outil actif. Calculé en PHP pendant l'itération sur les rows du mapper (incrément quand `tools_count === 1`).
+
+#### `most_expensive_vendor`
+
+Plus haut `total_monthly_cost`. Tie-break alphabétique ASC.
+
+#### `most_efficient_vendor`
+
+Plus bas `average_cost_per_user` **non-null**. Tie-break alphabétique ASC. `null` si aucun vendor n'a de users (edge case).
+
+### Shape contextuelle
+
+| Scénario | Shape |
+|---|---|
+| Données présentes | `{ data: [...], vendor_insights: { single_tool_vendors, most_expensive_vendor, most_efficient_vendor } }` |
+| Aucun outil actif | `{ data: [], vendor_insights: { single_tool_vendors: 0 }, message: "No analytics data..." }` |
+
+`most_expensive_vendor` et `most_efficient_vendor` sont nullable dans `VendorSummaryInsights` → omis via `skip_null_values` quand il n'y a pas de données. `single_tool_vendors` est non-null avec défaut 0 — toujours présent.
+
 ## Documentation Swagger enrichie (`src/OpenApi/`)
 
 Un `OpenApiFactory` décore le factory par défaut d'API Platform pour enrichir la doc `/api/docs` :
@@ -872,6 +936,7 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 - `Analytics\ExpensiveToolExample` — GET analytics expensive-tools, 200 (with_data + no_match + empty_db) + 400
 - `Analytics\ToolsByCategoryExample` — GET analytics tools-by-category, 200 (with_data + empty_db)
 - `Analytics\LowUsageToolExample` — GET analytics low-usage-tools, 200 (with_data + empty_db) + 400
+- `Analytics\VendorSummaryExample` — GET analytics vendor-summary, 200 (with_data + empty_db)
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
@@ -898,7 +963,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   │       ├── Output/               # DTOs responses (ToolCollectionOutput, ToolOutput, ToolDetailOutput, ToolWriteOutput, Usage*)
 │   │       └── Query/                # DTOs query params (ListToolsQuery — Asserts + Callback + helpers pagination/sort)
 │   ├── Entity/                       # Entités Doctrine (Tool, Category) avec TABLE_NAME en const
-│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy, EfficiencyRating, WarningLevel)
+│   ├── Enum/                         # Enums typés (Department, ToolStatus, CategoryName, SortBy, SortOrder, DepartmentCostSortBy, EfficiencyRating, WarningLevel, VendorEfficiency)
 │   ├── EventSubscriber/              # ApiExceptionSubscriber pour normaliser les erreurs
 │   ├── Exception/
 │   │   ├── Domain/                   # Invariants métier violés (InvalidToolStateException, InvalidNumericValueException, InvalidIntegerValueException)
@@ -906,7 +971,7 @@ Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple affic
 │   ├── Factory/
 │   │   ├── Analytics/                # Factories query params pour analytics (DepartmentCostsQueryFactory, ...)
 │   │   └── Tool/                     # ListToolsQueryFactory (Request → DTO), ToolIdFactory (uriVariables → int validé)
-│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast, EfficiencyClassifier, WarningLevelClassifier — utilisés par la couche Analytics)
+│   ├── Helper/                       # Helpers partagés (NumberFormatter, ScalarCast, EfficiencyClassifier, WarningLevelClassifier, VendorEfficiencyClassifier — utilisés par la couche Analytics)
 │   ├── Http/
 │   │   ├── ApiMessage.php            # Messages paramétrés (noResourceAvailable, noMatch, pageOutOfRange)
 │   │   └── ApiResponse.php           # Factory pour JsonResponse d'erreur (notFound, validationFailed, internalError, ...)

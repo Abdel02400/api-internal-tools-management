@@ -14,11 +14,13 @@ use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
 use App\ApiResource\Analytics\ExpensiveToolAnalyticsResource;
 use App\ApiResource\Analytics\LowUsageToolAnalyticsResource;
 use App\ApiResource\Analytics\ToolsByCategoryAnalyticsResource;
+use App\ApiResource\Analytics\VendorSummaryAnalyticsResource;
 use App\ApiResource\Tool\ToolResource;
 use App\OpenApi\Example\Analytics\DepartmentCostExample;
 use App\OpenApi\Example\Analytics\ExpensiveToolExample;
 use App\OpenApi\Example\Analytics\LowUsageToolExample;
 use App\OpenApi\Example\Analytics\ToolsByCategoryExample;
+use App\OpenApi\Example\Analytics\VendorSummaryExample;
 use App\OpenApi\Example\CreateToolExample;
 use App\OpenApi\Example\ErrorResponseExample;
 use App\OpenApi\Example\ToolCollectionExample;
@@ -268,6 +270,19 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             ];
         }
 
+        if ($method === 'get' && $this->isVendorSummaryPath($path)) {
+            return [
+                'with_data' => $this->example(
+                    'GET /api/analytics/vendor-summary — analyse par fournisseur',
+                    VendorSummaryExample::DATA,
+                ),
+                'empty_db' => $this->example(
+                    'GET /api/analytics/vendor-summary — aucun outil actif en DB',
+                    VendorSummaryExample::EMPTY_DB,
+                ),
+            ];
+        }
+
         return null;
     }
 
@@ -289,6 +304,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function isLowUsageToolsPath(string $path): bool
     {
         return rtrim($path, '/') === $this->apiPrefix . LowUsageToolAnalyticsResource::URI;
+    }
+
+    private function isVendorSummaryPath(string $path): bool
+    {
+        return rtrim($path, '/') === $this->apiPrefix . VendorSummaryAnalyticsResource::URI;
     }
 
     /**
