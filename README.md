@@ -998,3 +998,59 @@ Résultat côté Swagger UI : **2 sections uniquement**, `Tool` et `Analytics` (
 │   └── ValueObject/Number/           # NullableFloat, NullableInt — parsing typé safe
 └── var/                              # Cache & logs (ignorés par git)
 ```
+
+## Pistes d'amélioration — à reprendre en V2
+
+Liste des points que je n'ai pas eu le temps de traiter dans la fenêtre du test mais que j'aurais attaqués en priorité dans une V2. Classés par impact.
+
+### Qualité & couverture
+
+- **Tests automatisés (PHPUnit)** — aucun test n'est livré faute de temps. Priorité à mettre en place :
+  - **Tests fonctionnels** sur chaque route (`ApiTestCase` d'API Platform) pour valider contractuellement le shape JSON, les codes HTTP, les messages d'erreur et les filtres/pagination/tri
+  - **Tests unitaires** sur la logique métier isolée : `EfficiencyClassifier`, `WarningLevelClassifier`, `VendorEfficiencyClassifier`, `NumberFormatter`, les mappers analytics (calculs cost_percentage, tie-breaks, savings)
+  - **Tests d'intégration DB** sur les repositories DBAL natifs (les SQL agrégés avec `GROUP BY`, `CASE WHEN`, `GROUP_CONCAT` sont la zone la plus fragile — un fixtures set dédié permettrait de garantir la non-régression des calculs)
+
+### Observabilité
+
+- **Logs structurés sur les erreurs** — actuellement `ApiExceptionSubscriber` convertit les exceptions en réponses JSON mais ne log **rien**. Tout ce qui tombe dans le `500 fallback` (exception inattendue) disparaît silencieusement en prod. À ajouter :
+  - Injecter `Psr\Log\LoggerInterface` dans le subscriber
+  - Log `warning` sur les 400/404 (utile pour détecter des abus ou bugs clients)
+  - Log `error` avec stacktrace sur les 500 (avant de renvoyer le message générique)
+  - Mapping des exceptions → niveaux de log cohérents
+
+### Sécurité
+
+- **Restriction des routes exposées** — API Platform peut auto-générer des endpoints par défaut au-delà de ceux explicitement documentés (ex: `/api/contexts/*`, `/api/docs.jsonld`, `/api/errors/*`). À verrouiller :
+  - Auditer toutes les routes réellement exposées via `bin/console debug:router` et désactiver celles qui ne font pas partie du spec
+  - Désactiver complètement Swagger UI en prod (ou le mettre derrière une auth) — `api_platform.enable_swagger_ui: false` en `prod`
+  - Désactiver les formats non nécessaires (JSON-LD, HAL, etc.) déjà fait via `formats: [JsonEncoder::FORMAT]` sur les `ApiResource`, à vérifier au niveau global
+  - Mettre en place une auth (JWT ou Symfony Security) — aucun endpoint n'est sécurisé actuellement
+
+### Outillage pour le reviewer
+
+- **Collection Postman / Bruno / Hoppscotch** — fournir un fichier `collection.json` avec tous les endpoints, cas nominal + cas d'erreur, variables d'environnement pré-remplies. Le reviewer teste en un clic sans avoir à rédiger les requêtes. À committer à côté de `docker/` dans un dossier `docs/` ou `collections/`.
+
+### Architecture & organisation
+
+- **Refactor `src/OpenApi/OpenApiFactory.php`** — le fichier a grossi (~290 lignes) avec des `match` branchant sur `isDepartmentCostsPath`, `isExpensiveToolsPath`, etc. À splitter :
+  - Un `OpenApiEnricherInterface` avec une méthode `supports(string $path, string $method): bool` et `enrich(OpenApiOperation): OpenApiOperation`
+  - Une implémentation par endpoint (`DepartmentCostEnricher`, `ExpensiveToolEnricher`, etc.)
+  - Le factory principal itère sur la liste des enrichers (injectés via un tagged service)
+  - Ajouter un nouvel endpoint = ajouter une classe, sans toucher au factory
+
+- **Refactor `src/EventSubscriber/ApiExceptionSubscriber.php`** — monolithique lui aussi (~200 lignes) avec plusieurs `if ($exception instanceof X)` en cascade. À splitter :
+  - Un `ExceptionHandlerInterface` avec `supports(Throwable): bool` et `handle(Throwable): JsonResponse`
+  - Une implémentation par type d'exception (`ValidationFailedHandler`, `DeserializationHandler`, `ToolNotFoundHandler`, `DbalExceptionHandler`, `GenericErrorHandler`)
+  - Subscriber réduit au dispatch : trouve le handler qui `supports()`, délègue
+  - Ajouter un nouveau type d'erreur = ajouter un handler, sans toucher au subscriber
+
+- **Sous-dossiers plus granulaires** — actuellement certains dossiers groupent par ressource (`Dto/Tool/`, `Dto/Analytics/<endpoint>/`) mais pas partout. À uniformiser si d'autres ressources s'ajoutent — par ex. `src/Repository/Tool/` dédié, cohérent avec le pattern analytics.
+
+- **Déduplication des exemples Swagger** — les valeurs comme `"Confluence"`, `"Engineering"`, `"2025-05-01"` sont hardcodées dans plusieurs fichiers de `src/OpenApi/Example/` (ex: `ToolDetailExample::FOUND` et `UpdateToolExample::UPDATED` partagent des champs). Une refacto propre :
+  - Créer un `ExampleFixtures` avec des constantes partagées (`CONFLUENCE_ID = 5`, `CONFLUENCE_NAME = 'Confluence'`, `CONFLUENCE_VENDOR = 'Atlassian'`, etc.)
+  - Les `Example` composent leur payload à partir de ces constantes
+  - Bénéfice : quand on corrige une donnée (ex: renommer `Confluence` en autre chose), on touche 1 seul endroit — plus de dérive entre exemples
+
+### Couche domaine / métier
+
+- **Tests d'integration avec données fixtures dédiées** — les seed `init.sql` datent de 2025 (usage_logs en particulier) alors qu'on est en 2026, donc les métriques `usage_metrics.last_30_days` retournent systématiquement 0 en l'état. Une fixture "récente" permettrait de valider le comportement réel de l'agrégat. Contournement actuel : SQL vérifiée manuellement sur fenêtre élargie (documenté section `GET /api/tools/{id}`).
