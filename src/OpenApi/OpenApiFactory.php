@@ -9,6 +9,7 @@ use ApiPlatform\OpenApi\Model\Operation as OpenApiOperation;
 use ApiPlatform\OpenApi\Model\PathItem;
 use ApiPlatform\OpenApi\Model\RequestBody;
 use ApiPlatform\OpenApi\Model\Response;
+use ApiPlatform\OpenApi\Model\Tag;
 use ApiPlatform\OpenApi\OpenApi;
 use App\ApiResource\Analytics\DepartmentCostAnalyticsResource;
 use App\ApiResource\Analytics\ExpensiveToolAnalyticsResource;
@@ -34,6 +35,10 @@ use Symfony\Component\DependencyInjection\Attribute\AutowireDecorated;
 #[AsDecorator(decorates: 'api_platform.openapi.factory')]
 final readonly class OpenApiFactory implements OpenApiFactoryInterface
 {
+    private const ANALYTICS_URI_PREFIX = '/analytics';
+    private const ANALYTICS_TAG = 'Analytics';
+    private const ANALYTICS_TAG_DESCRIPTION = 'Endpoints analytiques (Part 2) : répartition coûts par département et catégorie, outils coûteux, outils sous-utilisés, synthèse fournisseurs. Tous restreints à `status = active`.';
+
     public function __construct(
         #[AutowireDecorated]
         private OpenApiFactoryInterface $decorated,
@@ -54,7 +59,50 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
             $paths->addPath($path, $this->enrichPathItem($path, $pathItem));
         }
 
-        return $openApi;
+        return $this->rebuildTopLevelTags($openApi);
+    }
+
+    /**
+     * Reconstruit les tags top-level pour ne garder QUE ceux référencés par au moins
+     * une opération (on a réécrit les tags des 5 ressources analytics vers `Analytics`
+     * — les anciens tags `DepartmentCost`, `ExpensiveTool`, etc. sont orphelins côté
+     * top-level et apparaîtraient comme sections vides dans Swagger UI).
+     *
+     * On ajoute également la description du tag `Analytics`.
+     */
+    private function rebuildTopLevelTags(OpenApi $openApi): OpenApi
+    {
+        $used = [];
+        foreach ($openApi->getPaths()->getPaths() as $pathItem) {
+            if (!$pathItem instanceof PathItem) {
+                continue;
+            }
+            foreach ([$pathItem->getGet(), $pathItem->getPost(), $pathItem->getPut(), $pathItem->getPatch(), $pathItem->getDelete()] as $op) {
+                if (!$op instanceof OpenApiOperation) {
+                    continue;
+                }
+                foreach ($op->getTags() ?? [] as $tag) {
+                    if (is_string($tag)) {
+                        $used[$tag] = true;
+                    }
+                }
+            }
+        }
+
+        $kept = [];
+        foreach ($openApi->getTags() as $tag) {
+            if ($tag instanceof Tag && isset($used[$tag->getName()])) {
+                $kept[] = $tag;
+                unset($used[$tag->getName()]);
+            }
+        }
+        foreach (array_keys($used) as $name) {
+            $kept[] = $name === self::ANALYTICS_TAG
+                ? new Tag(name: self::ANALYTICS_TAG, description: self::ANALYTICS_TAG_DESCRIPTION)
+                : new Tag(name: $name);
+        }
+
+        return $openApi->withTags($kept);
     }
 
     private function enrichPathItem(string $path, PathItem $pathItem): PathItem
@@ -79,6 +127,10 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
 
     private function enrichOperation(string $path, string $method, OpenApiOperation $operation): OpenApiOperation
     {
+        if ($this->isAnalyticsPath($path)) {
+            $operation = $operation->withTags([self::ANALYTICS_TAG]);
+        }
+
         $operation = $this->enrichRequestBody($path, $method, $operation);
 
         $responses = $operation->getResponses() ?? [];
@@ -309,6 +361,11 @@ final readonly class OpenApiFactory implements OpenApiFactoryInterface
     private function isVendorSummaryPath(string $path): bool
     {
         return rtrim($path, '/') === $this->apiPrefix . VendorSummaryAnalyticsResource::URI;
+    }
+
+    private function isAnalyticsPath(string $path): bool
+    {
+        return str_starts_with($path, $this->apiPrefix . self::ANALYTICS_URI_PREFIX);
     }
 
     /**

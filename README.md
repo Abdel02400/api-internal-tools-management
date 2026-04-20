@@ -940,6 +940,12 @@ Les exemples vivent dans des classes dédiées (`src/OpenApi/Example/`) pour sé
 
 Le dev qui ouvre Swagger UI peut **choisir dans un dropdown** quel exemple afficher pour chaque endpoint.
 
+### Regroupement par tag OpenAPI
+
+Par défaut API Platform crée un tag par `shortName` → Swagger UI affiche 7 sections (Tool + 1 par ressource analytics) dispersées. `OpenApiFactory` écrase les tags des 5 opérations `/analytics/*` vers un tag unique **`Analytics`** (avec une description métier), et filtre les tags top-level pour ne conserver que ceux effectivement référencés par au moins une opération.
+
+Résultat côté Swagger UI : **2 sections uniquement**, `Tool` et `Analytics` (dépliable, description métier visible). Les 5 endpoints analytiques apparaissent sous la section `Analytics`.
+
 ## Structure du projet
 
 ```
